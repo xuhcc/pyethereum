@@ -1,4 +1,10 @@
+
 from sha3 import sha3_256
+try:
+    sha3_256('a')
+except TypeError:
+    from python_sha3 import sha3_256
+    sha3_256('a')
 from bitcoin import privtopub
 import struct
 import os
