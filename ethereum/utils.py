@@ -1,10 +1,9 @@
 
 from sha3 import sha3_256
 try:
-    sha3_256('a')
+    sha3_256('.')
 except TypeError:
     from python_sha3 import sha3_256
-    sha3_256('a')
 from bitcoin import privtopub
 import struct
 import os
@@ -93,6 +92,22 @@ def int_to_32bytearray(i):
         o[31 - x] = i & 0xff
         i >>= 8
     return o
+
+counter = [0, 0, 0, 0]
+
+import time
+
+
+def sha3_count(seed):
+    counter[0] += 1
+    counter[1] += len(seed)
+    if not seed:
+        counter[2] += 1
+    print 'sha3', counter
+    st = time.time()
+    d = sha3_256(seed).digest()
+    counter[3] += time.time() - st
+    return d
 
 
 def sha3(seed):
