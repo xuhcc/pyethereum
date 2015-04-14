@@ -95,25 +95,25 @@ def int_to_32bytearray(i):
 
 # measure sha3 calls
 
-counter = [0, 0, 0, 0]
+sha3_call_counter = [0, 0, 0, 0]
 import time
 import atexit
 
 
 def _sha3_stats():
-    print 'sha3: calls:{} total_len:{} empty:{} tottime:{}'.format(*counter)
+    print 'sha3: calls:{} total_len:{} empty:{} tottime:{}'.format(*sha3_call_counter)
 
 atexit.register(_sha3_stats)
 
 
 def sha3_count(seed):
-    counter[0] += 1
-    counter[1] += len(seed)
+    sha3_call_counter[0] += 1
+    sha3_call_counter[1] += len(seed)
     if not seed:
-        counter[2] += 1
+        sha3_call_counter[2] += 1
     st = time.time()
     d = sha3_256(seed).digest()
-    counter[3] += time.time() - st
+    sha3_call_counter[3] += time.time() - st
     return d
 
 

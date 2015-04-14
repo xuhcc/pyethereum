@@ -9,6 +9,7 @@ from ethereum.utils import to_string, safe_ord
 import json
 import os
 import time
+from collections import OrderedDict
 from ethereum import ethash
 from ethereum import ethash_utils
 db = EphemDB()
@@ -407,16 +408,21 @@ def run_ethash_test(params, mode):
 
 
 def get_tests_from_file_or_dir(dname, json_only=False):
+
+    def sorted_json(dn):
+        d = json.load(open(dn))
+        return OrderedDict((k, d[k]) for k in sorted(d.keys()))
+
     if os.path.isfile(dname):
         if dname[-5:] == '.json' or not json_only:
-            return {dname: json.load(open(dname))}
+            return OrderedDict({dname: sorted_json(dname)})
         else:
-            return {}
+            return OrderedDict()
     else:
-        o = {}
-        for f in os.listdir(dname):
+        o = OrderedDict()
+        for f in sorted(os.listdir(dname)):
             fullpath = os.path.join(dname, f)
-            for k, v in list(get_tests_from_file_or_dir(fullpath, True).items()):
+            for k, v in get_tests_from_file_or_dir(fullpath, True).items():
                 o[k] = v
         return o
 
