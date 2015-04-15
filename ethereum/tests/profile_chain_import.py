@@ -69,16 +69,15 @@ def import_blocks(num=10):
 
 
 def run():
-    # import_blocks(100)
+    import_blocks(100)
     # iter_blocks(1000000)
-    return decode_blocks(100)
+    # return decode_blocks(100)
 
 if __name__ == '__main__':
     if len(sys.argv) == 2:
         pr = cProfile.Profile()
-        blocks = run()
         pr.enable()
-        rlp.encode(blocks)
+        blocks = run()
         pr.disable()
         s = StringIO.StringIO()
         sortby = 'tottime'
