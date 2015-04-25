@@ -158,6 +158,7 @@ class Chain(object):
                     uncles.discard(self.get(u))
             if blk.has_parent():
                 blk = blk.get_parent()
+
         uncles = list(uncles)
         ts = max(int(time.time()), block.timestamp + 1)
         self.head_candidate = blocks.Block.init_from_parent(block, coinbase=self._coinbase,
@@ -269,8 +270,10 @@ class Chain(object):
                   if the transaction was invalid
         """
         assert self.head_candidate is not None
-        _log = log.bind(tx_hash=transaction)
-        _log.debug("add transaction")
+        log.debug('new tx', num_txs=len(self.get_transactions()), tx_hash=transaction)
+        if transaction in self.get_transactions():
+            log.debug('known tx')
+            return
         old_state_root = self.head_candidate.state_root
         # revert finalization
         self.head_candidate.state_root = self.pre_finalize_state_root
@@ -279,23 +282,20 @@ class Chain(object):
         except processblock.InvalidTransaction as e:
             # if unsuccessful the prerequisites were not fullfilled
             # and the tx is invalid, state must not have changed
-            log.debug('invalid tx', tx_hash=transaction, errors=e)
+            log.debug('invalid tx', error=e)
             success = False
 
-        # finalize
-        self.pre_finalize_state_root = self.head_candidate.state_root
-        self.head_candidate.finalize()
-
-        if not success:
-            log.debug('tx not applied', tx_hash=transaction)
-            assert old_state_root == self.head_candidate.state_root
-            return False
-        else:
+        if success:
             assert transaction in self.get_transactions()
-            log.debug('transaction applied', tx_hash=transaction,
-                      block_hash=self.head_candidate, result=output)
+            self.pre_finalize_state_root = self.head_candidate.state_root
+            self.head_candidate.finalize()
+            log.debug('tx applied', result=output)
             assert old_state_root != self.head_candidate.state_root
             return True
+        else:
+            log.debug('tx failed')
+            self.head_candidate.state_root = old_state_root  # reset
+            return False
 
     def get_transactions(self):
         """Get a list of new transactions not yet included in a mined block
