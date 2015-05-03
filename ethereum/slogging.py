@@ -10,11 +10,6 @@ log = get_logger('eth.vm.op')
 log.trace('event name', some=data)
 
 Use Namespaces for components and subprotocols
-net
-net.handshake
-net.frames
-p2p.peer
-p2p.peermanager
 eth.vm
 eth.vm.op
 eth.vm.mem

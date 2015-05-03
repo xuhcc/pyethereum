@@ -10,6 +10,12 @@ def json_decode(x):
     return yaml.safe_load(x)
 
 
+def method_id(name, encode_types):
+    ""
+    sig = name + '(' + ','.join(encode_types) + ')'
+    return big_endian_to_int(utils.sha3(sig)[:4])
+
+
 class ContractTranslator():
 
     def __init__(self, full_signature):
@@ -31,23 +37,21 @@ class ContractTranslator():
                 sys.stderr.write("Warning: multiple methods with the same "
                                  " name. Use %s to call %s with types %r"
                                  % (name, sig_item['name'], encode_types))
-            sig = name + '(' + ','.join(encode_types) + ')'
+            m_id = method_id(name, encode_types)
             if sig_item['type'] == 'function':
-                prefix = big_endian_to_int(utils.sha3(sig)[:4])
                 decode_types = [f['type'] for f in sig_item['outputs']]
                 is_unknown_type = len(sig_item['outputs']) and \
                     sig_item['outputs'][0]['name'] == 'unknown_out'
                 self.function_data[name] = {
-                    "prefix": prefix,
+                    "prefix": m_id,
                     "encode_types": encode_types,
                     "decode_types": decode_types,
                     "is_unknown_type": is_unknown_type
                 }
             elif sig_item['type'] == 'event':
-                prefix = big_endian_to_int(utils.sha3(sig))
                 indexed = [f['indexed'] for f in sig_item['inputs']]
                 names = [f['name'] for f in sig_item['inputs']]
-                self.event_data[prefix] = {
+                self.event_data[m_id] = {
                     "types": encode_types,
                     "name": name,
                     "names": names,
@@ -56,8 +60,7 @@ class ContractTranslator():
 
     def encode(self, name, args):
         fdata = self.function_data[name]
-        return zpad(encode_int(fdata['prefix']), 4) + \
-            encode_abi(fdata['encode_types'], args)
+        return zpad(encode_int(fdata['prefix']), 4) + encode_abi(fdata['encode_types'], args)
 
     def decode(self, name, data):
         fdata = self.function_data[name]
@@ -264,6 +267,7 @@ def encode_abi(types, args):
     for typ, arg in zip(types, args):
         base, sub, arrlist = process_type(typ)
         l, n, v = encode_any(arg, base, sub, arrlist)
+        print typ, arg, repr((l, n, v))
         len_args += l
         normal_args += n
         var_args += v

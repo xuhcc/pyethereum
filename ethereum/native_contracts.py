@@ -166,10 +166,42 @@ class CreateNativeContractInstance(NativeContract):
 registry.register(CreateNativeContractInstance)
 
 
-class ABIEvent(object):
+class NativeABIEvent(object):
 
     def __init__(self, ext, msg,   *args):
         ext.log(msg.to, topics, data)
+import inspect
+import abi
+from ethereum.utils import encode_int, zpad, big_endian_to_int, is_numeric, is_string
+import traceback
+
+
+class FrozenClass(object):
+    __isfrozen = False
+
+    def __setattr__(self, key, value):
+        if self.__isfrozen and not hasattr(self, key):
+            raise TypeError("%r is a frozen class" % self)
+        object.__setattr__(self, key, value)
+
+    def _freeze(self):
+        self.__isfrozen = True
+
+
+def abi_encode_args(method, args):
+    pass
+
+
+def abi_decode_args(method, data):
+    pass
+
+
+def abi_encode_return_vals(method, vals):
+    pass
+
+
+def abi_decode_return_vals(method, data):
+    pass
 
 
 class NativeABIContract(NativeContract):
@@ -178,13 +210,93 @@ class NativeABIContract(NativeContract):
     The special method NativeABIContract is the constructor
     which is run during creation of the contract and cannot be called afterwards.
 
-    https://github.com/ethereum/wiki/wiki/Solidity-Tutorial#fallback-functions
+    Constructor ?
+
+
     """
 
+    events = []
+
     def __init__(self):
-        # setup mapping 4_identifier_bytes : (method, signature, returns)
-        # for each method
-            # check if it has abi signature (at least returns is required)
+        self._setup_abi()
+        self._method_by_id = dict()
+
+    def _setup_abi(self):
+        for name in dir(self):
+            method = getattr(self, name)
+            if not name.startswith('_') and inspect.ismethod(method):
+                m_as = inspect.getargspec(method)
+                arg_names = list(m_as.args)
+                decode_types = list(m_as.defaults)
+                assert len(arg_names) == len(decode_types) == len(set(arg_names))
+                if 'returns' in arg_names:
+                    assert arg_names.pop() == 'returns'
+                    encode_types = decode_types.pop()  # can be list or multiple
+                else:
+                    encode_types = []
+                m_id = abi.method_id(name, decode_types)
+                self._method_by_id[m_id] = (name, method, decode_types, encode_types)
 
     def __call__(self, ext, msg):
+        try:
+            return self._safe_call(ext, msg)
+        except Exception:
+            print traceback.format_exc()
+            return 0, msg.gas, []
+
+    def _safe_call(self, ext, msg):
         super(NativeABIContract, self).__call__(ext, msg)
+        calldata = msg.data.extract_all()
+        # get method
+        m_id = big_endian_to_int(calldata[:4])  # first 4 bytes encode method_id
+        if m_id not in self._method_by_id:  # 404 method not found
+            return 0, msg.gas, []           # no default methods supported
+        # decode abi args
+        name, method, decode_types, encode_types = self._method_by_id[m_id]
+        args = abi.decode_abi(decode_types, calldata[4:])
+        # call method
+        res = self._method_by_id[m_id](args)
+        # encode return value
+        if isinstance(encode_types, list):
+            assert isinstance(res, (list, tuple)) and len(res) == len(encode_types)
+        else:
+            res = (res, )
+            encode_types = (encode_types, )
+        return 1, msg.gas, abi.encode_abi(encode_types, res)
+
+    def _decode_method_args(self, method):
+        pass
+
+    def encode_for_method(self, )
+
+    def with_tester(self, state):
+        """
+
+        """
+
+
+"""
+Storage Objects
+Type Safe Wrap Methods
+
+call
+address.call
+
+    def init(): - executed upon contract creation, accepts no parameters
+    def shared(): - executed before running init and user functions
+    def code(): - executed before any user functions
+
+constants
+
+stop
+
+
+modifiers, @nca.isowner
+
+
+"""
+
+
+if __name__ == '__main__':
+
+    nac = NativeABIContract()
