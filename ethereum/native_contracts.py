@@ -77,7 +77,7 @@ class Registry(object):
         assert issubclass(contract, NativeContract)
         assert len(NativeContract.address) == 20
         assert NativeContract.address.startswith(self.native_contract_address_prefix)
-        self.native_contracts[contract.address] = contract()
+        self.native_contracts[contract.address] = contract._on_msg
         print("registered native contract {} at address {}".format(contract, contract.address))
 
     def unregister(self, contract):
@@ -98,13 +98,20 @@ class NativeContract(object):
 
     address = utils.int_to_addr(1024)
 
-    def __init__(self):  # instance is created during registration Registry.register
-        pass
-
-    def __call__(self, ext, msg):
+    def __init__(self, ext, msg):
         self.ext = ext
         self.msg = msg
-        return self._call()
+        self.gas = msg.gas
+
+    @classmethod
+    def _on_msg(cls, ext, msg):
+        print 'IN ON MESSAGE' * 10
+        nac = cls(ext, msg)
+        try:
+            return nac._safe_call()
+        except Exception:
+            print ('\n' * 2) + traceback.format_exc()
+            return 0, msg.gas, []
 
     def _get_storage_data(self, key):
         return self.ext.get_storage_data(self.msg.to, key)
@@ -112,17 +119,16 @@ class NativeContract(object):
     def _set_storage_data(self, key, value):
         return self.ext.set_storage_data(self.msg.to, key, value)
 
-    def _call(self):
-        success = 1
-        gas_used = 0
-        output = []
-        return success, gas_used, output
+    def _safe_call(self):
+        return 1, self.gas, []
 
 
 class CreateNativeContractInstance(NativeContract):
 
     """
     special contract to create an instance of native contract
+    instance refers to instance in the BC.
+
     msg.data[:4] defines the native contract
     msg.data[4:] is sent as data to the new contract
 
@@ -132,35 +138,35 @@ class CreateNativeContractInstance(NativeContract):
 
     address = utils.int_to_addr(1024)
 
-    def __call__(self, ext, msg):
-        assert len(msg.sender) == 20
-        assert len(msg.data.extract_all()) >= 4
+    def _safe_call(self):
+        assert len(self.msg.sender) == 20
+        assert len(self.msg.data.extract_all()) >= 4
 
         # get native contract
-        nc_address = registry.native_contract_address_prefix + msg.data.extract_all()[:4]
+        nc_address = registry.native_contract_address_prefix + self.msg.data.extract_all()[:4]
         print "IN CNCI", nc_address
         if nc_address not in registry:
-            return 0, msg.gas, b''
-        native_contract = registry[nc_address]
+            return 0, self.msg.gas, b''
+        native_contract = registry[nc_address].im_self
 
         # get new contract address
-        if ext.tx_origin != msg.sender:
-            ext._block.increment_nonce(msg.sender)
-        nonce = utils.encode_int(ext._block.get_nonce(msg.sender) - 1)
-        msg.to = registry.mk_instance_address(native_contract, msg.sender, nonce)
-        assert not ext.get_balance(msg.to)  # must be none existant
+        if self.ext.tx_origin != self.msg.sender:
+            self.ext._block.increment_nonce(self.msg.sender)
+        nonce = utils.encode_int(self.ext._block.get_nonce(self.msg.sender) - 1)
+        self.msg.to = registry.mk_instance_address(native_contract, self.msg.sender, nonce)
+        assert not self.ext.get_balance(self.msg.to)  # must be none existant
 
         # value was initially added to this contract's address, we need to transfer
-        success = ext._block.transfer_value(self.address, msg.to, msg.value)
+        success = self.ext._block.transfer_value(self.address, self.msg.to, self.msg.value)
         assert success
-        assert not ext.get_balance(self.address)
+        assert not self.ext.get_balance(self.address)
 
         # call new instance with additional data
-        msg.is_create = True
-        msg.data = vm.CallData(msg.data.data[4:], 0, 0)
-        res, gas, dat = registry[msg.to](ext, msg)
+        self.msg.is_create = True
+        self.msg.data = vm.CallData(self.msg.data.data[4:], 0, 0)
+        res, gas, dat = registry[self.msg.to](self.ext, self.msg)
         assert gas >= 0
-        return res, gas, memoryview(msg.to).tolist()
+        return res, gas, memoryview(self.msg.to).tolist()
 
 
 registry.register(CreateNativeContractInstance)
@@ -188,91 +194,107 @@ class FrozenClass(object):
         self.__isfrozen = True
 
 
+#   helper to de/encode method calls
+
 def abi_encode_args(method, args):
-    pass
+    "encode args for method: method_id|data"
+    assert issubclass(method.im_class, NativeABIContract), method.im_class
+    method_id, arg_types = method.im_class._get_method_abi(method)[:2]
+    return zpad(encode_int(method_id), 4) + abi.encode_abi(arg_types, args)
 
 
 def abi_decode_args(method, data):
-    pass
+    # data is payload w/o method_id
+    assert issubclass(method.im_class, NativeABIContract), method.im_class
+    arg_types = method.im_class._get_method_abi(method)[1]
+    return abi.decode_abi(arg_types, data)
 
 
 def abi_encode_return_vals(method, vals):
-    pass
+    assert issubclass(method.im_class, NativeABIContract)
+    return_types = method.im_class._get_method_abi(method)[2]
+    # encode return value to list
+    if isinstance(return_types, list):
+        assert isinstance(vals, (list, tuple)) and len(vals) == len(return_types)
+    else:  # FIXME NONE?
+        vals = (vals, )
+        return_types = (return_types, )
+    return abi.encode_abi(return_types, vals)
 
 
 def abi_decode_return_vals(method, data):
-    pass
+    assert issubclass(method.im_class, NativeABIContract)
+    return_types = method.im_class._get_method_abi(method)[2]
+    if not isinstance(return_types, (list, tuple)):
+        return abi.decode_abi((return_types, ), data)[0]
+    else:
+        return abi.decode_abi(return_types, data)
+
+
+def tester_call_method(state, sender, method, *args):
+    data = abi_encode_args(method, args)
+    to = method.im_class.address
+    r = state._send(sender, to, value=0, evmdata=data)['output']
+    return abi_decode_return_vals(method, r)
 
 
 class NativeABIContract(NativeContract):
 
     """
+    public method must have a signature describing
+    - the arguments with their types
+    - the return value
+
+    The 'returns' keyword arg indicates, that this is a public abi method
+
+    def afunc(ctx, a='uint16', b='uint16', returns='uint32'):
+        return a + b
+
     The special method NativeABIContract is the constructor
     which is run during creation of the contract and cannot be called afterwards.
 
     Constructor ?
-
-
     """
 
     events = []
 
-    def __init__(self):
-        self._setup_abi()
-        self._method_by_id = dict()
+    @classmethod
+    def _get_method_abi(cls, method):
+        m_as = inspect.getargspec(method)
+        arg_names = list(m_as.args)[1:]
+        if 'returns' not in arg_names:  # indicates, this is an abi method
+            return None, None, None
+        arg_types = list(m_as.defaults)
+        assert len(arg_names) == len(arg_types) == len(set(arg_names))
+        assert arg_names.pop() == 'returns'  # must be last element
+        return_types = arg_types.pop()  # can be list or multiple
+        name = method.__func__.func_name
+        m_id = abi.method_id(name, arg_types)
+        return (m_id, arg_types, return_types)
 
-    def _setup_abi(self):
-        for name in dir(self):
-            method = getattr(self, name)
-            if not name.startswith('_') and inspect.ismethod(method):
-                m_as = inspect.getargspec(method)
-                arg_names = list(m_as.args)
-                decode_types = list(m_as.defaults)
-                assert len(arg_names) == len(decode_types) == len(set(arg_names))
-                if 'returns' in arg_names:
-                    assert arg_names.pop() == 'returns'
-                    encode_types = decode_types.pop()  # can be list or multiple
-                else:
-                    encode_types = []
-                m_id = abi.method_id(name, decode_types)
-                self._method_by_id[m_id] = (name, method, decode_types, encode_types)
+    @classmethod
+    def _find_method(cls, method_id):
+        for name in dir(cls):
+            method = getattr(cls, name)
+            if inspect.ismethod(method):
+                m_abi = cls._get_method_abi(method)
+                if m_abi[0] and m_abi[0] == method_id:
+                    return method, m_abi[1], m_abi[2]
+        return None, None, None
 
-    def __call__(self, ext, msg):
-        try:
-            return self._safe_call(ext, msg)
-        except Exception:
-            print traceback.format_exc()
-            return 0, msg.gas, []
-
-    def _safe_call(self, ext, msg):
-        super(NativeABIContract, self).__call__(ext, msg)
-        calldata = msg.data.extract_all()
+    def _safe_call(self):
+        print "in safe call"
+        calldata = self.msg.data.extract_all()
         # get method
         m_id = big_endian_to_int(calldata[:4])  # first 4 bytes encode method_id
-        if m_id not in self._method_by_id:  # 404 method not found
-            return 0, msg.gas, []           # no default methods supported
+        method, arg_types, return_types = self._find_method(m_id)
+        if not method:  # 404 method not found
+            return 0, self.gas, []  # no default methods supported
         # decode abi args
-        name, method, decode_types, encode_types = self._method_by_id[m_id]
-        args = abi.decode_abi(decode_types, calldata[4:])
-        # call method
-        res = self._method_by_id[m_id](args)
-        # encode return value
-        if isinstance(encode_types, list):
-            assert isinstance(res, (list, tuple)) and len(res) == len(encode_types)
-        else:
-            res = (res, )
-            encode_types = (encode_types, )
-        return 1, msg.gas, abi.encode_abi(encode_types, res)
-
-    def _decode_method_args(self, method):
-        pass
-
-    def encode_for_method(self, )
-
-    def with_tester(self, state):
-        """
-
-        """
+        args = abi.decode_abi(arg_types, calldata[4:])
+        # call (unbound) method
+        res = method(self, *args)
+        return 1, self.gas, memoryview(abi_encode_return_vals(method, res)).tolist()
 
 
 """
