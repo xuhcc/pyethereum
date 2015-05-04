@@ -31,7 +31,10 @@ Limitations:
     EXTCODECOPY on an address with a NativeContract
         returns ''
 """
-
+import inspect
+import abi
+from ethereum.utils import encode_int, zpad, big_endian_to_int, is_numeric, is_string
+import traceback
 import specials
 import utils
 import processblock
@@ -170,10 +173,6 @@ class NativeABIEvent(object):
 
     def __init__(self, ext, msg,   *args):
         ext.log(msg.to, topics, data)
-import inspect
-import abi
-from ethereum.utils import encode_int, zpad, big_endian_to_int, is_numeric, is_string
-import traceback
 
 
 class FrozenClass(object):
@@ -237,7 +236,31 @@ class NativeABIContract(NativeContract):
                 m_id = abi.method_id(name, decode_types)
                 self._method_by_id[m_id] = (name, method, decode_types, encode_types)
 
-    def __call__(self, ext, msg):
+    @property
+    @classmethod
+    def abimethods(cls):
+        "returns (method_id, (name, method, decode_types, encode_types)"
+        methods = []
+        for name in dir(cls):
+            method = getattr(cls, name)
+            if not name.startswith('_') and inspect.ismethod(method):
+                m_as = inspect.getargspec(method)
+                arg_names = list(m_as.args)
+                decode_types = list(m_as.defaults)
+                assert len(arg_names) == len(decode_types) == len(set(arg_names))
+                if 'returns' in arg_names:
+                    assert arg_names.pop() == 'returns'
+                    encode_types = decode_types.pop()  # can be list or multiple
+                else:
+                    encode_types = []
+                m_id = abi.method_id(name, decode_types)
+                methods.append((name, method, m_id, decode_types, encode_types))
+        return methods
+
+
+
+
+    def __call__(cls, ext, msg):
         try:
             return self._safe_call(ext, msg)
         except Exception:
@@ -273,6 +296,10 @@ class NativeABIContract(NativeContract):
         """
 
         """
+
+
+
+
 
 
 """
