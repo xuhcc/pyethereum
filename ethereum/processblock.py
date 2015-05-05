@@ -235,6 +235,7 @@ def _apply_msg(ext, msg, code):
         return 1, msg.gas, []
     # Main loop
     if msg.code_address in specials.specials:
+        log_msg.debug('calling special', func=specials.specials[msg.code_address])
         res, gas, dat = specials.specials[msg.code_address](ext, msg)
     else:
         res, gas, dat = vm.vm_execute(ext, msg, code)

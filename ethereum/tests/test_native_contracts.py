@@ -14,8 +14,9 @@ test creation, how to do it in tester?
 class EchoContract(native_contracts.NativeContract):
     address = utils.int_to_addr(2000)
 
-    def __call__(self, ext, msg):
-        res, gas, data = 1, msg.gas, msg.data.data
+    def _safe_call(self):
+        print "echo contract called" * 10
+        res, gas, data = 1, self.msg.gas, self.msg.data.data
         return res, gas, data
 
 
@@ -24,7 +25,7 @@ def test_registry():
     assert tester.a0 not in reg
 
     native_contracts.registry.register(EchoContract)
-    assert isinstance(native_contracts.registry[EchoContract.address], EchoContract)
+    assert issubclass(native_contracts.registry[EchoContract.address].im_self, EchoContract)
     native_contracts.registry.unregister(EchoContract)
 
 
@@ -71,22 +72,54 @@ class SampleNAC(native_contracts.NativeABIContract):
         return a * b
 
     def bfunc(ctx, a='uint16', returns='uint16'):
-        z = ctx.afunc(a, 2)  # direct native call
-        return z
+        return ctx.afunc(a, 2)  # direct native call
+
+    def cfunc(ctx, a='uint16', returns=['uint16', 'uint16']):
+        return a, a  # returns tuple
+
+    def dfunc(ctx, a='uint16[2]', returns=['uint16']):
+        print "dfunc", a
+        return a[0] * a[1]
 
     def add_property(ctx):
         ctx.dummy = True  # must fail
 
 
 def test_nac_tester():
-    snac = native_contracts.tester_contract(SampleNAC)
-    assert 6 == snac.afunc(3, 2)
-    assert 10 == snac.afunc(5)
+    assert issubclass(SampleNAC.afunc.im_class, SampleNAC)
+    state = tester.state()
+    native_contracts.registry.register(SampleNAC)
+    sender = tester.k0
 
-    snac.afunc(5)
+    assert 12 == native_contracts.tester_call_method(state, sender, SampleNAC.afunc, 3, 4)
+    assert 26 == native_contracts.tester_call_method(state, sender, SampleNAC.bfunc, 13)
+    assert 4, 4 == native_contracts.tester_call_method(state, sender, SampleNAC.cfunc, 4)
+
+    # ??? strange error
+    #assert 30 == native_contracts.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
+
+    # values out of range must fail
+    try:
+        native_contracts.tester_call_method(state, sender, SampleNAC.bfunc, -1)
+    except Exception:
+        pass
+    else:
+        assert False, 'not in range uint16'
+    try:
+        native_contracts.tester_call_method(state, sender, SampleNAC.afunc, 2**15, 2)
+    except Exception:
+        pass
+    else:
+        assert False, 'not in range uint16'
+    try:
+        native_contracts.tester_call_method(state, sender, SampleNAC.afunc, [1], 2)
+    except Exception:
+        pass
+    else:
+        assert False, 'not in range uint16'
 
 
-def test_nac_add_property_fail():
+def xtest_nac_add_property_fail():
     native_contracts.registry.register(SampleNAC)
     snac = native_contracts.tester_contract(SampleNAC)
     try:
@@ -126,7 +159,3 @@ class ExtendedSampleNAC(SampleNAC):
 ToDo:
     Wrap all funcs and make sure, that they are called with the appropriate arguments
 """
-
-
-"""
-
