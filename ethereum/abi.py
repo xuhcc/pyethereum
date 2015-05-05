@@ -332,6 +332,7 @@ def decode_any(data, base, sub, arrlist):
 
 
 def decode_abi(types, data):
+    assert isinstance(data, bytes)
     # List of processed types
     processed_types = [process_type(typ) for typ in types]
     # List of { 1 if variable-sized else 0 }

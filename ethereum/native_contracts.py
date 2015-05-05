@@ -354,8 +354,8 @@ class NativeABIContract(NativeContract):
 class ABIEvent(object):
 
     """
-    ABIEvents must implementa function called abi, which defines 
-    the canonical typ of the data and whether it is indexed or not. 
+    ABIEvents must implementa function called abi, which defines
+    the canonical typ of the data and whether it is indexed or not.
     https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI#events
 
     class Shout(nc.ABIEvent):
@@ -364,31 +364,56 @@ class ABIEvent(object):
     """
 
     arg_types = []
+    arg_names = []
     indexed = 0
+
+    @classmethod
+    def event_id(cls):
+        return abi.method_id(cls.__name__, cls.arg_types)
 
     def __init__(self, ctx, *args):
         assert isinstance(ctx, NativeABIContract)
         assert len(self.arg_types) == len(args)
 
         # topic0 sha3(EventName + signature)
-        topics = [abi.method_id(self.__class__.__name__, self.arg_types)]
+        topics = [self.event_id()]
 
         # topics 1-n
         for i in range(min(self.indexed, 3)):
-            topics.append(abi.encode_abi([arg_types[i]], [args[i]]))
-
+            topics.append(big_endian_to_int(abi.encode_abi([self.arg_types[i]], [args[i]])))
         # remaining non indexed data
-        data = abi.encode_abi(arg_types[i:], args[i:])
+        i = len(topics) - 1
+        data = abi.encode_abi(self.arg_types[i:], args[i:])
+
+        # add log
         ctx._ext.log(ctx.address, topics, data)
+
+    @classmethod
+    def listen(cls, log, address=None):
+        if not len(log.topics) or log.topics[0] != cls.event_id():
+            return
+        if address and address != log.address:
+            return
+        o = {cls.arg_names[i]: abi.decode_abi([cls.arg_types[i]], zpad(encode_int(t), 32))[0]
+             for i, t in enumerate(log.topics[1:])}
+        o['event_type'] = cls.__name__
+        unindexed_types = cls.arg_types[cls.indexed:]
+        o['args'] = abi.decode_abi(unindexed_types, log.data)
+        print(o)
+        return o
 
 
 #  Tester helpers #####################################
+
+def listen_logs(state, event, address=None):
+    state.block.log_listeners.append(lambda l: event.listen(l, address))
 
 
 def tester_call_method(state, sender, method, *args):
     data = abi_encode_args(method, args)
     to = method.im_class.address
     r = state._send(sender, to, value=0, evmdata=data)['output']
+    state.block.log_listeners.append(lambda log: self._translator.listen(log))
     return abi_decode_return_vals(method, r)
 
 

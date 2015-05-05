@@ -36,7 +36,9 @@ def test_echo_contract():
     nc.registry.register(EchoContract)
     s = tester.state()
     testdata = 'hello'
+    print "SENDING DATA"
     r = s._send(tester.k0, EchoContract.address, 0, testdata)
+    print 'DONE'
     assert r['output'] == testdata
     nc.registry.unregister(EchoContract)
 
@@ -248,12 +250,25 @@ def Xtest_owned_decorator():
 
 ## Events #########################
 
+class Shout(nc.ABIEvent):
+    arg_types = ['uint16', 'uint16', 'uint16']
+    arg_names = ['a', 'b', 'c']
+    indexed = 1  # up to which arg_index args should be indexed
+
+
 class EventNAC(nc.NativeABIContract):
     address = utils.int_to_addr(2005)
 
-    class Shout(nc.ABIEvent):
-        arg_types = ['uint16', 'uint16', 'uint16']
-        indexed = 1  # up to which arg_index args should be indexed
-
     def afunc(ctx, a='uint16', b='uint16', returns=None):
-        Shout(ctx, a, b, c)
+        Shout(ctx, a, b, 3)
+
+
+def test_events():
+    # create multiple nac instances and assert they are different contracts
+    state = tester.state()
+    nc.registry.register(EventNAC)
+
+    # create proxies
+    nc.listen_logs(state, Shout)
+    c0 = nc.tester_nac(state, tester.k0, EventNAC.address)
+    c0.afunc(1, 2)
