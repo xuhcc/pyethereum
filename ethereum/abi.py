@@ -100,23 +100,31 @@ class ContractTranslator():
 # Decode an integer
 
 
+class EncodingError(Exception):
+    pass
+
+
+class ValueOutOfBounds(EncodingError):
+    pass
+
+
 def decint(n):
     if is_numeric(n) and n < 2**256 and n > -2**255:
         return n
     elif is_numeric(n):
-        raise Exception("Number out of range: %r" % n)
+        raise EncodingError("Number out of range: %r" % n)
     elif is_string(n) and len(n) == 40:
         return big_endian_to_int(decode_hex(n))
     elif is_string(n) and len(n) <= 32:
         return big_endian_to_int(n)
     elif is_string(n) and len(n) > 32:
-        raise Exception("String too long: %r" % n)
+        raise EncodingError("String too long: %r" % n)
     elif n is True:
         return 1
     elif n is False or n is None:
         return 0
     else:
-        raise Exception("Cannot encode integer: %r" % n)
+        raise EncodingError("Cannot encode integer: %r" % n)
 
 
 # Encodes a base type
@@ -126,29 +134,32 @@ def encode_single(arg, base, sub):
     if base == 'uint':
         sub = int(sub)
         i = decint(arg)
-        assert 0 <= i < 2**sub, "Value out of bounds: %r" % arg
+        if not 0 <= i < 2**sub:
+            raise ValueOutOfBounds(repr(arg))
         normal_args = zpad(encode_int(i), 32)
     # Signed integers: int<sz>
     elif base == 'int':
         sub = int(sub)
         i = decint(arg)
-        assert -2**(sub - 1) <= i < 2**sub, "Value out of bounds: %r" % arg
+        if not -2**(sub - 1) <= i < 2**sub:
+            raise ValueOutOfBounds(repr(arg))
         normal_args = zpad(encode_int(i % 2**sub), 32)
     # Unsigned reals: ureal<high>x<low>
     elif base == 'ureal':
         high, low = [int(x) for x in sub.split('x')]
-        assert 0 <= arg < 2**high, "Value out of bounds: %r" % arg
+        if not 0 <= arg < 2**high:
+            raise ValueOutOfBounds(repr(arg))
         normal_args = zpad(encode_int(arg * 2**low), 32)
     # Signed reals: real<high>x<low>
     elif base == 'real':
         high, low = [int(x) for x in sub.split('x')]
-        assert -2**(high - 1) <= arg < 2**(high - 1), \
-            "Value out of bounds: %r" % arg
+        if not -2**(high - 1) <= arg < 2**(high - 1):
+            raise ValueOutOfBounds(repr(arg))
         normal_args = zpad(encode_int((arg % 2**high) * 2**low), 32)
     # Strings
     elif base == 'string':
         if not is_string(arg):
-            raise Exception("Expecting string: %r" % arg)
+            raise EncodingError("Expecting string: %r" % arg)
         # Fixed length: string<sz>
         if len(sub):
             assert int(sub) <= 32
@@ -168,7 +179,7 @@ def encode_single(arg, base, sub):
         elif len(arg) == len(sub) * 2:
             normal_args = zpad(decode_hex(arg), 32)
         else:
-            raise Exception("Could not parse hash: %r" % arg)
+            raise EncodingError("Could not parse hash: %r" % arg)
     # Addresses: address (== hash160)
     elif base == 'address':
         assert sub == ''
@@ -179,7 +190,7 @@ def encode_single(arg, base, sub):
         elif len(arg) == 40:
             normal_args = zpad(decode_hex(arg), 32)
         else:
-            raise Exception("Could not parse address: %r" % arg)
+            raise EncodingError("Could not parse address: %r" % arg)
     return len_args, normal_args, var_args
 
 
@@ -235,8 +246,8 @@ def encode_any(arg, base, sub, arrlist):
     # Variable-sized arrays
     if arrlist[-1] == '[]':
         if base == 'string' and sub == '':
-            raise Exception('Array of dynamic-sized items not allowed: %r'
-                            % arg)
+            raise EncodingError('Array of dynamic-sized items not allowed: %r'
+                                % arg)
         o = ''
         assert isinstance(arg, list), "Expecting array: %r" % arg
         for a in arg:
@@ -246,7 +257,7 @@ def encode_any(arg, base, sub, arrlist):
     # Fixed-sized arrays
     else:
         if base == 'string' and sub == '':
-            raise Exception('Array of dynamic-sized items not allowed')
+            raise EncodingError('Array of dynamic-sized items not allowed')
         sz = int(arrlist[-1][1:-1])
         assert isinstance(arg, list), "Expecting array: %r" % arg
         assert sz == len(arg), "Wrong number of elements in array: %r" % arg
@@ -263,7 +274,7 @@ def encode_abi(types, args):
     normal_args = ''
     var_args = ''
     if len(types) != len(args):
-        raise Exception("Wrong number of arguments!")
+        raise EncodingError("Wrong number of arguments!")
     for typ, arg in zip(types, args):
         base, sub, arrlist = process_type(typ)
         l, n, v = encode_any(arg, base, sub, arrlist)
@@ -336,7 +347,7 @@ def decode_abi(types, data):
     normal_args = data[lenl: lenl + constl]
     # Not enough data for static-length arguments?
     if len(data) < lenl + constl:
-        raise Exception("ABI decode failed: not enough data")
+        raise EncodingError("ABI decode failed: not enough data")
     # Portion of data corresponding to variable-sized types
     var_args = data[lenl + constl:]
     lenpos, normalpos, varpos = 0, 0, 0
@@ -348,7 +359,7 @@ def decode_abi(types, data):
             data = var_args[varpos: varpos + L]
             varpos += L
             if varpos > len(var_args):
-                raise Exception("ABI decode failed: not enough data")
+                raise EncodingError("ABI decode failed: not enough data")
             o.append(decode_any(data, *t))
         else:
             data = normal_args[normalpos: normalpos + l]
