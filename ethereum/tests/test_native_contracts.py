@@ -1,6 +1,9 @@
 from ethereum import tester
 from ethereum import utils
-from ethereum import native_contracts
+from ethereum import native_contracts as nc
+from ethereum import abi
+import logging
+logging.NOTSET = logging.DEBUG
 
 """
 test registration
@@ -11,58 +14,54 @@ test creation, how to do it in tester?
 """
 
 
-class EchoContract(native_contracts.NativeContract):
+class EchoContract(nc.NativeContract):
     address = utils.int_to_addr(2000)
 
     def _safe_call(self):
         print "echo contract called" * 10
-        res, gas, data = 1, self.msg.gas, self.msg.data.data
+        res, gas, data = 1, self._msg.gas, self._msg.data.data
         return res, gas, data
 
 
 def test_registry():
-    reg = native_contracts.registry
+    reg = nc.registry
     assert tester.a0 not in reg
 
-    native_contracts.registry.register(EchoContract)
-    assert issubclass(native_contracts.registry[EchoContract.address].im_self, EchoContract)
-    native_contracts.registry.unregister(EchoContract)
+    nc.registry.register(EchoContract)
+    assert issubclass(nc.registry[EchoContract.address].im_self, EchoContract)
+    nc.registry.unregister(EchoContract)
 
 
 def test_echo_contract():
-    native_contracts.registry.register(EchoContract)
+    nc.registry.register(EchoContract)
     s = tester.state()
     testdata = 'hello'
     r = s._send(tester.k0, EchoContract.address, 0, testdata)
     assert r['output'] == testdata
-    native_contracts.registry.unregister(EchoContract)
+    nc.registry.unregister(EchoContract)
 
 
 def test_native_contract_instances():
-    native_contracts.registry.register(EchoContract)
+    nc.registry.register(EchoContract)
 
     s = tester.state()
-
-    # last 4 bytes of address are used to reference the contract
-    data = EchoContract.address[-4:]
     value = 100
+    create = nc.tester_create_native_contract_instance
+    eci_address = create(s, tester.k0, EchoContract, value)
 
-    r = s._send(tester.k0, native_contracts.CreateNativeContractInstance.address, value, data)
-    eci_address = r['output']
-    # expect to get address of new contract instance
     assert len(eci_address) == 20
     # expect that value was transfered to the new contract
     assert s.block.get_balance(eci_address) == value
-    assert s.block.get_balance(native_contracts.CreateNativeContractInstance.address) == 0
+    assert s.block.get_balance(nc.CreateNativeContractInstance.address) == 0
 
     # test the new contract
     data = 'hello'
     r = s.send(tester.k0, eci_address, 0, data)
     assert r == data
-    native_contracts.registry.unregister(EchoContract)
+    nc.registry.unregister(EchoContract)
 
 
-class SampleNAC(native_contracts.NativeABIContract):
+class SampleNAC(nc.NativeABIContract):
     address = utils.int_to_addr(2001)
 
     def initialize(ctx, a='int8', c='bool', d='uint8[]'):
@@ -77,85 +76,184 @@ class SampleNAC(native_contracts.NativeABIContract):
     def cfunc(ctx, a='uint16', returns=['uint16', 'uint16']):
         return a, a  # returns tuple
 
-    def dfunc(ctx, a='uint16[2]', returns=['uint16']):
-        print "dfunc", a
+    def dfunc(ctx, a='uint16[2]', returns='uint16'):
         return a[0] * a[1]
 
-    def add_property(ctx):
+    def void_func(ctx, a='uint16', returns=None):
+        return
+
+    def noargs_func(ctx, returns='uint16'):
+        return 42
+
+    def add_property(ctx, returns=None):
         ctx.dummy = True  # must fail
+
+    def special_vars(ctx, returns=None):
+        def _is_address(a):
+            return isinstance(a, bytes) and len(a) == 20
+
+        assert ctx.msg_data
+        assert _is_address(ctx.msg_sender)
+        assert ctx.msg_value == 0
+        assert ctx.tx_gasprice
+        assert _is_address(ctx.tx_origin)
+        assert _is_address(ctx.block_coinbase)
+        assert ctx.block_difficulty
+        assert ctx.block_number == 0
+        assert ctx.block_gaslimit
+        assert 0 == ctx.get_balance(ctx.address)
+        assert _is_address(ctx.address)
+        assert ctx.balance == 0
+        assert ctx.balance == ctx.get_balance(ctx.address)
+        if ctx.block_number > 0:
+            assert ctx.get_block_hash(ctx.block_number - 1) == ctx.block_prevhash
+
+    def test_suicide(ctx, returns=None):
+        ctx.suicide(ctx.block_coinbase)
+
+    def get_address(ctx, returns='string'):
+        return ctx.address
 
 
 def test_nac_tester():
     assert issubclass(SampleNAC.afunc.im_class, SampleNAC)
     state = tester.state()
-    native_contracts.registry.register(SampleNAC)
+    nc.registry.register(SampleNAC)
     sender = tester.k0
 
-    assert 12 == native_contracts.tester_call_method(state, sender, SampleNAC.afunc, 3, 4)
-    assert 26 == native_contracts.tester_call_method(state, sender, SampleNAC.bfunc, 13)
-    assert 4, 4 == native_contracts.tester_call_method(state, sender, SampleNAC.cfunc, 4)
-
-    # ??? strange error
-    #assert 30 == native_contracts.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
-
+    assert 12 == nc.tester_call_method(state, sender, SampleNAC.afunc, 3, 4)
+    assert 26 == nc.tester_call_method(state, sender, SampleNAC.bfunc, 13)
+    assert 4, 4 == nc.tester_call_method(state, sender, SampleNAC.cfunc, 4)
+    assert 30 == nc.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
+    assert 42 == nc.tester_call_method(state, sender, SampleNAC.noargs_func)
+    assert None is nc.tester_call_method(state, sender, SampleNAC.void_func, 3)
+    assert None is nc.tester_call_method(state, sender, SampleNAC.special_vars)
     # values out of range must fail
     try:
-        native_contracts.tester_call_method(state, sender, SampleNAC.bfunc, -1)
-    except Exception:
+        nc.tester_call_method(state, sender, SampleNAC.bfunc, -1)
+    except abi.ValueOutOfBounds:
         pass
     else:
-        assert False, 'not in range uint16'
+        assert False, 'must fail'
     try:
-        native_contracts.tester_call_method(state, sender, SampleNAC.afunc, 2**15, 2)
-    except Exception:
+        nc.tester_call_method(state, sender, SampleNAC.afunc, 2**15, 2)
+    except tester.TransactionFailed:
         pass
     else:
-        assert False, 'not in range uint16'
+        assert False, 'must fail'
     try:
-        native_contracts.tester_call_method(state, sender, SampleNAC.afunc, [1], 2)
-    except Exception:
+        nc.tester_call_method(state, sender, SampleNAC.afunc, [1], 2)
+    except abi.EncodingError:
         pass
     else:
-        assert False, 'not in range uint16'
+        assert False, 'must fail'
 
 
-def xtest_nac_add_property_fail():
-    native_contracts.registry.register(SampleNAC)
-    snac = native_contracts.tester_contract(SampleNAC)
+def test_nac_suicide():
+    state = tester.state()
+    nc.registry.register(SampleNAC)
+    sender = tester.k0
+    state._send(sender, SampleNAC.address, value=100)
+    assert state.block.get_balance(SampleNAC.address) == 100
+    assert None is nc.tester_call_method(state, sender, SampleNAC.test_suicide)
+    assert state.block.get_balance(SampleNAC.address) == 0
+
+
+def test_nac_add_property_fail():
+    state = tester.state()
+    nc.registry.register(SampleNAC)
+    sender = tester.k0
     try:
-        snac.add_property()
-    except TypeError:
+        nc.tester_call_method(state, sender, SampleNAC.add_property)
+    except tester.TransactionFailed:
         pass
     else:
         assert False, 'properties must not be createable'
 
 
-class ExtendedSampleNAC(SampleNAC):
-    address = utils.int_to_addr(2002)
+def test_nac_instances():
+    # create multiple nac instances and assert they are different contracts
+    state = tester.state()
+    nc.registry.register(SampleNAC)
 
-    storage = dict(owner='address',
-                   numbers='unit32[]',
-                   tokens='unint32[200]',
-                   userids='mapping{address:uint32}'
-                   )
+    a0 = nc.tester_create_native_contract_instance(state, tester.k0, SampleNAC)
+    a1 = nc.tester_create_native_contract_instance(state, tester.k0, SampleNAC)
+    a2 = nc.tester_create_native_contract_instance(state, tester.k0, SampleNAC)
 
-    def cfunc(ctx, a='uint16', returns='uint16'):
-        a = ctx.block.coinbase
-        # raw call
-        r = ctx.call(a, 'data')
-        # raw call, specifying gaslimit and value
-        r = ctx.call(a, 'data', gas=200, value=5)
+    assert a0 != a1 != a2
+    assert len(a0) == 20
 
-    def dfunc(ctx, a='uint16'):
-        ctx.numbers[200] = 42
-        x = ctx.numbers[90]  # return 0 on key error
+    # create proxies
+    c0 = nc.tester_nac(state, tester.k0, a0)
+    c1 = nc.tester_nac(state, tester.k0, a1)
+    c2 = nc.tester_nac(state, tester.k0, a2)
 
-    def efunc(ctx, a='uint16'):
-        # actual msg based call, with automatic en/decoding
-        res = ctx.call(SomeContract.afunc, 42, 43)
+    assert c0.get_address() == a0
+    assert c1.get_address() == a1
+    assert c2.get_address() == a2
+
+    assert c0.afunc(5, 6) == 30
+    assert c0.dfunc([4, 8]) == 32
 
 
-"""
-ToDo:
-    Wrap all funcs and make sure, that they are called with the appropriate arguments
-"""
+def test_inheritance():
+    pass
+
+
+class OwnedSampleNAC(SampleNAC):
+    address = utils.int_to_addr(2003)
+
+    def default_method(self):
+        if not self._get_storage_data('__owner__'):
+            self._set_storage_data('__owner__', self.tx_origin)
+
+    def owned(f):
+        def _f(self, *args):
+            if self.tx_origin == self._get_storage_data('__owner__'):
+                return f(self, *args)
+            raise RuntimeError('access restricted to owner')
+        return _f
+
+    def pom():
+        print 'om called'
+
+    # @owned   # does not work, as it shadows the signature
+    def access(self, returns='uint8'):
+        return 1
+
+
+def Xtest_owned_decorator():
+    state = tester.state()
+    nc.registry.register(OwnedSampleNAC)
+    func = nc.tester_create_native_contract_instance
+
+    # create an instance of the contract
+    owner = tester.k0
+    oc_a = func(state, owner, OwnedSampleNAC)
+    # the first call will go to default_method and set the owner
+    # owner should be able to successfuly call .access
+    oc_proxy_owner = nc.tester_nac(state, owner, oc_a)
+    assert oc_proxy_owner.access() == 1
+
+    # non owners should not be able to call .access
+    non_owner = tester.k1
+    oc_proxy_non_owner = nc.tester_nac(state, non_owner, oc_a)
+    try:
+        oc_proxy_non_owner.access()
+    except tester.TransactionFailed:
+        pass
+    else:
+        assert False, 'non owner must not access this method'
+
+
+## Events #########################
+
+class EventNAC(nc.NativeABIContract):
+    address = utils.int_to_addr(2005)
+
+    class Shout(nc.ABIEvent):
+        arg_types = ['uint16', 'uint16', 'uint16']
+        indexed = 1  # up to which arg_index args should be indexed
+
+    def afunc(ctx, a='uint16', b='uint16', returns=None):
+        Shout(ctx, a, b, c)

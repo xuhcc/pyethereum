@@ -36,6 +36,12 @@ import specials
 import utils
 import processblock
 import vm
+import inspect
+import abi
+from ethereum.utils import encode_int, zpad, big_endian_to_int
+import traceback
+from slogging import get_logger
+log = get_logger('nativecontracts')
 
 
 class Registry(object):
@@ -99,8 +105,8 @@ class NativeContract(object):
     address = utils.int_to_addr(1024)
 
     def __init__(self, ext, msg):
-        self.ext = ext
-        self.msg = msg
+        self._ext = ext
+        self._msg = msg
         self.gas = msg.gas
 
     @classmethod
@@ -114,10 +120,10 @@ class NativeContract(object):
             return 0, msg.gas, []
 
     def _get_storage_data(self, key):
-        return self.ext.get_storage_data(self.msg.to, key)
+        return self._ext.get_storage_data(self._msg.to, key)
 
     def _set_storage_data(self, key, value):
-        return self.ext.set_storage_data(self.msg.to, key, value)
+        return self._ext.set_storage_data(self._msg.to, key, value)
 
     def _safe_call(self):
         return 1, self.gas, []
@@ -139,59 +145,37 @@ class CreateNativeContractInstance(NativeContract):
     address = utils.int_to_addr(1024)
 
     def _safe_call(self):
-        assert len(self.msg.sender) == 20
-        assert len(self.msg.data.extract_all()) >= 4
+        assert len(self._msg.sender) == 20
+        assert len(self._msg.data.extract_all()) >= 4
 
         # get native contract
-        nc_address = registry.native_contract_address_prefix + self.msg.data.extract_all()[:4]
+        nc_address = registry.native_contract_address_prefix + self._msg.data.extract_all()[:4]
         print "IN CNCI", nc_address
         if nc_address not in registry:
-            return 0, self.msg.gas, b''
+            return 0, self._msg.gas, b''
         native_contract = registry[nc_address].im_self
 
         # get new contract address
-        if self.ext.tx_origin != self.msg.sender:
-            self.ext._block.increment_nonce(self.msg.sender)
-        nonce = utils.encode_int(self.ext._block.get_nonce(self.msg.sender) - 1)
-        self.msg.to = registry.mk_instance_address(native_contract, self.msg.sender, nonce)
-        assert not self.ext.get_balance(self.msg.to)  # must be none existant
+        if self._ext.tx_origin != self._msg.sender:
+            self._ext._block.increment_nonce(self._msg.sender)
+        nonce = utils.encode_int(self._ext._block.get_nonce(self._msg.sender) - 1)
+        self._msg.to = registry.mk_instance_address(native_contract, self._msg.sender, nonce)
+        assert not self._ext.get_balance(self._msg.to)  # must be none existant
 
         # value was initially added to this contract's address, we need to transfer
-        success = self.ext._block.transfer_value(self.address, self.msg.to, self.msg.value)
+        success = self._ext._block.transfer_value(self.address, self._msg.to, self._msg.value)
         assert success
-        assert not self.ext.get_balance(self.address)
+        assert not self._ext.get_balance(self.address)
 
         # call new instance with additional data
-        self.msg.is_create = True
-        self.msg.data = vm.CallData(self.msg.data.data[4:], 0, 0)
-        res, gas, dat = registry[self.msg.to](self.ext, self.msg)
+        self._msg.is_create = True
+        self._msg.data = vm.CallData(self._msg.data.data[4:], 0, 0)
+        res, gas, dat = registry[self._msg.to](self._ext, self._msg)
         assert gas >= 0
-        return res, gas, memoryview(self.msg.to).tolist()
+        return res, gas, memoryview(self._msg.to).tolist()
 
 
 registry.register(CreateNativeContractInstance)
-
-
-class NativeABIEvent(object):
-
-    def __init__(self, ext, msg,   *args):
-        ext.log(msg.to, topics, data)
-import inspect
-import abi
-from ethereum.utils import encode_int, zpad, big_endian_to_int, is_numeric, is_string
-import traceback
-
-
-class FrozenClass(object):
-    __isfrozen = False
-
-    def __setattr__(self, key, value):
-        if self.__isfrozen and not hasattr(self, key):
-            raise TypeError("%r is a frozen class" % self)
-        object.__setattr__(self, key, value)
-
-    def _freeze(self):
-        self.__isfrozen = True
 
 
 #   helper to de/encode method calls
@@ -214,9 +198,14 @@ def abi_encode_return_vals(method, vals):
     assert issubclass(method.im_class, NativeABIContract)
     return_types = method.im_class._get_method_abi(method)[2]
     # encode return value to list
+    print 'aBI RETURN VALs', repr(vals), return_types
     if isinstance(return_types, list):
         assert isinstance(vals, (list, tuple)) and len(vals) == len(return_types)
-    else:  # FIXME NONE?
+    elif vals is None:
+        assert return_types is None
+        print "in abi return as None"
+        return ''
+    else:
         vals = (vals, )
         return_types = (return_types, )
     return abi.encode_abi(return_types, vals)
@@ -225,17 +214,14 @@ def abi_encode_return_vals(method, vals):
 def abi_decode_return_vals(method, data):
     assert issubclass(method.im_class, NativeABIContract)
     return_types = method.im_class._get_method_abi(method)[2]
-    if not isinstance(return_types, (list, tuple)):
+    if not len(data):
+        if return_types is None:
+            return None
+        return b''
+    elif not isinstance(return_types, (list, tuple)):
         return abi.decode_abi((return_types, ), data)[0]
     else:
         return abi.decode_abi(return_types, data)
-
-
-def tester_call_method(state, sender, method, *args):
-    data = abi_encode_args(method, args)
-    to = method.im_class.address
-    r = state._send(sender, to, value=0, evmdata=data)['output']
-    return abi_decode_return_vals(method, r)
 
 
 class NativeABIContract(NativeContract):
@@ -256,7 +242,47 @@ class NativeABIContract(NativeContract):
     Constructor ?
     """
 
-    events = []
+    __isfrozen = False
+
+    def __init__(self, ext, msg):
+        super(NativeABIContract, self).__init__(ext, msg)
+
+        # copy special variables
+        self.msg_data = msg.data.extract_all()
+        self.msg_sender = msg.sender
+        self.msg_gas = property(lambda: self._gas)
+        self.msg_value = msg.value
+
+        self.tx_gasprice = ext.tx_gasprice
+        self.tx_origin = ext.tx_origin
+
+        self.block_coinbase = ext.block_coinbase
+        self.block_timestamp = ext.block_timestamp
+
+        self.block_difficulty = ext.block_difficulty
+        self.block_number = ext.block_number
+        self.block_gaslimit = ext.block_gas_limit
+
+        self.address = msg.to
+        self.get_balance = ext.get_balance
+        self.get_block_hash = ext.block_hash
+
+        if self.block_number > 0:
+            self.block_prevhash = self.get_block_hash(self.block_number - 1)
+        else:
+            self.block_prevhash = '\0' * 32
+
+        self.__isfrozen = True
+
+    @property
+    def balance(self):  # can change during subcalls
+        return self.get_balance(self.address)
+
+    def suicide(self, address):
+        assert isinstance(address, bytes) and len(address) == 20
+        self._ext.set_balance(address, self.get_balance(address) + self.balance)
+        self._ext.set_balance(self.address, 0)
+        self._ext.add_suicide(self.address)
 
     @classmethod
     def _get_method_abi(cls, method):
@@ -273,29 +299,131 @@ class NativeABIContract(NativeContract):
         return (m_id, arg_types, return_types)
 
     @classmethod
-    def _find_method(cls, method_id):
+    def _abi_methods(cls):
+        methods = []
         for name in dir(cls):
             method = getattr(cls, name)
             if inspect.ismethod(method):
                 m_abi = cls._get_method_abi(method)
-                if m_abi[0] and m_abi[0] == method_id:
-                    return method, m_abi[1], m_abi[2]
+                if m_abi[0]:
+                    methods.append(method)
+        return methods
+
+    @classmethod
+    def _find_method(cls, method_id):
+        for method in cls._abi_methods():
+            m_abi = cls._get_method_abi(method)
+            if m_abi[0] and m_abi[0] == method_id:
+                return method, m_abi[1], m_abi[2]
         return None, None, None
+
+    def default_method(self):
+        """
+        method which gets called by default if no other method is found
+        note: this is no abi method and must make sense from self.msg_data
+        """
+        return 1, self.gas, []
 
     def _safe_call(self):
         print "in safe call"
-        calldata = self.msg.data.extract_all()
+        calldata = self._msg.data.extract_all()
         # get method
         m_id = big_endian_to_int(calldata[:4])  # first 4 bytes encode method_id
         method, arg_types, return_types = self._find_method(m_id)
         if not method:  # 404 method not found
-            return 0, self.gas, []  # no default methods supported
+            log.warn('method not found, calling default', methodid=m_id)
+            return 1, self.gas, []  # no default methods supported
         # decode abi args
+        print 'calldata', method,  calldata[4:], arg_types
         args = abi.decode_abi(arg_types, calldata[4:])
         # call (unbound) method
-        res = method(self, *args)
+        try:
+            res = method(self, *args)
+        except RuntimeError as e:
+            log.warn("error in method", method=method, error=e)
+            return 0, self.gas, []
         return 1, self.gas, memoryview(abi_encode_return_vals(method, res)).tolist()
 
+    def __setattr__(self, key, value):
+        "protect users from abusing properties"
+        if self.__isfrozen and not hasattr(self, key):
+            raise TypeError("%r must not be extended" % self)
+        object.__setattr__(self, key, value)
+
+
+class ABIEvent(object):
+
+    """
+    ABIEvents must implementa function called abi, which defines 
+    the canonical typ of the data and whether it is indexed or not. 
+    https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI#events
+
+    class Shout(nc.ABIEvent):
+        arg_types = ['uint16', 'uint16', 'uint16']
+        indexed = 1  # up to which arg_index args should be indexed
+    """
+
+    arg_types = []
+    indexed = 0
+
+    def __init__(self, ctx, *args):
+        assert isinstance(ctx, NativeABIContract)
+        assert len(self.arg_types) == len(args)
+
+        # topic0 sha3(EventName + signature)
+        topics = [abi.method_id(self.__class__.__name__, self.arg_types)]
+
+        # topics 1-n
+        for i in range(min(self.indexed, 3)):
+            topics.append(abi.encode_abi([arg_types[i]], [args[i]]))
+
+        # remaining non indexed data
+        data = abi.encode_abi(arg_types[i:], args[i:])
+        ctx._ext.log(ctx.address, topics, data)
+
+
+#  Tester helpers #####################################
+
+
+def tester_call_method(state, sender, method, *args):
+    data = abi_encode_args(method, args)
+    to = method.im_class.address
+    r = state._send(sender, to, value=0, evmdata=data)['output']
+    return abi_decode_return_vals(method, r)
+
+
+def tester_nac(state, sender, address, value=0):
+    "create an object which acts as a porxy for the contract"
+    klass = registry[address].im_self
+    assert issubclass(klass, NativeABIContract)
+
+    def mk_method(method):
+        def m(s, *args):
+            data = abi_encode_args(method, args)
+            r = state._send(sender, address, value=value, evmdata=data)['output']
+            return abi_decode_return_vals(method, r)
+        return m
+
+    class cproxy(object):
+        pass
+    for m in klass._abi_methods():
+        setattr(cproxy, m.__func__.func_name, mk_method(m))
+
+    return cproxy()
+
+
+def tester_create_native_contract_instance(state, sender, contract, value=0):
+    assert issubclass(contract, NativeContract)
+    assert NativeABIContract.address in registry
+    # last 4 bytes of address are used to reference the contract
+    data = contract.address[-4:]
+    r = state._send(sender, CreateNativeContractInstance.address, value, data)
+    return r['output']
+
+
+''
+
+""
 
 """
 Storage Objects
