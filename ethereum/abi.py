@@ -157,7 +157,7 @@ def encode_single(arg, base, sub):
             raise ValueOutOfBounds(repr(arg))
         normal_args = zpad(encode_int((arg % 2**high) * 2**low), 32)
     # Strings
-    elif base == 'string':
+    elif base == 'string' or base == 'bytes':
         if not is_string(arg):
             raise EncodingError("Expecting string: %r" % arg)
         # Fixed length: string<sz>
@@ -206,7 +206,7 @@ def process_type(typ):
     for a in arrlist[:-1]:
         assert len(a) > 2, "Inner arrays must have fixed size"
     # Check validity of string type
-    if base == 'string':
+    if base == 'string' or base == 'bytes':
         assert re.match('^[0-9]*$', sub), \
             "String type must have no suffix or numerical suffix"
         assert len(sub) or len(arrlist) == 0, \
@@ -245,7 +245,7 @@ def encode_any(arg, base, sub, arrlist):
         return encode_single(arg, base, sub)
     # Variable-sized arrays
     if arrlist[-1] == '[]':
-        if base == 'string' and sub == '':
+        if (base == 'string' or base == 'bytes') and sub == '':
             raise EncodingError('Array of dynamic-sized items not allowed: %r'
                                 % arg)
         o = ''
@@ -256,7 +256,7 @@ def encode_any(arg, base, sub, arrlist):
         return zpad(encode_int(len(arg)), 32), '', o
     # Fixed-sized arrays
     else:
-        if base == 'string' and sub == '':
+        if (base == 'string' or base == 'bytes') and sub == '':
             raise EncodingError('Array of dynamic-sized items not allowed')
         sz = int(arrlist[-1][1:-1])
         assert isinstance(arg, list), "Expecting array: %r" % arg
@@ -287,11 +287,11 @@ def encode_abi(types, args):
 
 def is_varsized(base, sub, arrlist):
     return (len(arrlist) and arrlist[-1] == '[]') or \
-           (base == 'string' and sub == '')
+           ((base == 'string' or base == 'bytes') and sub == '')
 
 
 def getlen(base, sub, arrlist):
-    if base == 'string' and not len(sub):
+    if (base == 'string' or base == 'bytes') and not len(sub):
         sz = 1
     else:
         sz = 32
@@ -304,7 +304,7 @@ def getlen(base, sub, arrlist):
 def decode_single(data, base, sub):
     if base == 'address':
         return encode_hex(data[12:])
-    elif base == 'string' or base == 'hash':
+    elif base == 'string' or base == 'bytes' or base == 'hash':
         return data[:int(sub)] if len(sub) else data
     elif base == 'uint':
         return big_endian_to_int(data)
