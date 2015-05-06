@@ -80,9 +80,10 @@ class Registry(object):
 
     def register(self, contract):
         "registers NativeContract classes"
-        assert issubclass(contract, NativeContract)
-        assert len(NativeContract.address) == 20
-        assert NativeContract.address.startswith(self.native_contract_address_prefix)
+        assert issubclass(contract, NativeContractBase)
+        assert len(contract.address) == 20
+        assert contract.address.startswith(self.native_contract_address_prefix)
+        assert contract.address not in self.native_contracts
         self.native_contracts[contract.address] = contract._on_msg
         print("registered native contract {} at address {}".format(contract, contract.address))
 
@@ -100,7 +101,7 @@ class Registry(object):
 specials.specials = registry = Registry()
 
 
-class NativeContract(object):
+class NativeContractBase(object):
 
     address = utils.int_to_addr(1024)
 
@@ -111,7 +112,6 @@ class NativeContract(object):
 
     @classmethod
     def _on_msg(cls, ext, msg):
-        print 'IN ON MESSAGE' * 10
         nac = cls(ext, msg)
         try:
             return nac._safe_call()
@@ -129,7 +129,7 @@ class NativeContract(object):
         return 1, self.gas, []
 
 
-class CreateNativeContractInstance(NativeContract):
+class CreateNativeContractInstance(NativeContractBase):
 
     """
     special contract to create an instance of native contract
@@ -224,7 +224,7 @@ def abi_decode_return_vals(method, data):
         return abi.decode_abi(return_types, data)
 
 
-class NativeABIContract(NativeContract):
+class NativeABIContract(NativeContractBase):
 
     """
     public method must have a signature describing
@@ -413,7 +413,6 @@ def tester_call_method(state, sender, method, *args):
     data = abi_encode_args(method, args)
     to = method.im_class.address
     r = state._send(sender, to, value=0, evmdata=data)['output']
-    state.block.log_listeners.append(lambda log: self._translator.listen(log))
     return abi_decode_return_vals(method, r)
 
 
@@ -438,7 +437,7 @@ def tester_nac(state, sender, address, value=0):
 
 
 def tester_create_native_contract_instance(state, sender, contract, value=0):
-    assert issubclass(contract, NativeContract)
+    assert issubclass(contract, NativeContractBase)
     assert NativeABIContract.address in registry
     # last 4 bytes of address are used to reference the contract
     data = contract.address[-4:]
@@ -446,13 +445,129 @@ def tester_create_native_contract_instance(state, sender, contract, value=0):
     return r['output']
 
 
-''
+# Typed Storage for Contracts
 
-""
+
+class TypedStorage(object):
+
+    _prefix = b''
+    _set = None
+    _get = None
+
+    def __init__(self, value_type='unit8'):
+        self._value_type = value_type
+
+    def setup(self, prefix, getter, setter):
+        assert isinstance(prefix, bytes)
+        self._prefix = prefix
+        self._set = setter
+        self._get = getter
+
+    def _key(self, k):
+        return b'%s:%s' % (self._prefix, k)
+
+    def set(self, k=b'', v=None, value_type=None):
+        assert v is not None
+        print "MAINset", repr(k), repr(v), value_type or self._value_type
+        v = abi.encode_abi([value_type or self._value_type], [v])
+        print "MAINset", repr(k), repr(v)
+        self._set(self._key(k), big_endian_to_int(v))
+
+    def get(self, k=b'', value_type=None):
+        r = self._get(self._key(k))
+        return abi.decode_abi([value_type or self._value_type], zpad(encode_int(r), 32))[0]
+
+
+class Scalar(TypedStorage):
+    pass
+
+
+class List(TypedStorage):
+
+    def __getitem__(self, i):
+        assert isinstance(i, (int, long))
+        return self.get(bytes(i))
+
+    def __setitem__(self, i, v):
+        assert isinstance(i, (int, long))
+        self.set(bytes(i), v)
+        if i >= len(self):
+            self.set(b'__len__', i + 1, value_type='uint32')
+
+    def __len__(self):
+        return self.get(b'__len__', value_type='uint32')
+
+    def append(self, v):
+        self[len(self)] = v
+
+    def __contains__(self, idx):
+        raise NotImplementedError()
+
+
+class Dict(List):
+
+    def __getitem__(self, k):
+        assert isinstance(k, bytes), k
+        return self.get(k)
+
+    def __setitem__(self, k, v):
+        print "DICT set", k, v
+        assert isinstance(k, bytes)
+        self.set(k, v)
+        assert self.get(k) == v
+
+    def __contains__(self, k):
+        raise NotImplementedError('unset keys return zero as a default')
+
+
+class TypedStorageContract(NativeContractBase):
+
+    """
+    class MyContract(TypedStorageContract):
+        storage = dict(a=nc.Scalar('uint32'),
+                       b=nc.List('uint16'),
+                       c=nc.Dict('uint32'))
+
+        def afunc(ctx):
+            if not ctx.a:
+                ctx.a = 2
+            assert ctx.a == 2
+
+            ctx.b[9] = 1
+            assert len(ctx.b) >= 10
+            l = len(ctx.b)
+            ctx.b.append(20)
+            assert len(ctx.b) == l + 1
+    """
+    storage = dict()
+
+    def __init__(self, ext, msg):
+        super(TypedStorageContract, self).__init__(ext, msg)
+        self._prepare_storage(self._get_storage_data, self._set_storage_data)
+
+    def _prepare_storage(self, get_storage_data, set_storage_data):
+        self.db = dict()
+        for k, ts in self.storage.items():
+            ts.setup(k, get_storage_data, set_storage_data)
+            if isinstance(ts, (List, Dict)):
+                setattr(self, k, ts)
+            else:
+                assert isinstance(ts, Scalar)
+
+                def _mk_property(skalar):
+                    return property(lambda s: skalar.get(), lambda s, v: skalar.set(v=v))
+                setattr(self.__class__, k, _mk_property(ts))
+
+
+# The NativeContract Class ###################
+
+class NativeContract(NativeABIContract, TypedStorageContract):
+    pass
+
 
 """
-Storage Objects
-Type Safe Wrap Methods
+gas counting and
+OOG exception
 
 call
 address.call
@@ -462,16 +577,7 @@ address.call
     def code(): - executed before any user functions
 
 constants
-
 stop
 
-
 modifiers, @nca.isowner
-
-
 """
-
-
-if __name__ == '__main__':
-
-    nac = NativeABIContract()

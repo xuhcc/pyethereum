@@ -14,7 +14,7 @@ test creation, how to do it in tester?
 """
 
 
-class EchoContract(nc.NativeContract):
+class EchoContract(nc.NativeContractBase):
     address = utils.int_to_addr(2000)
 
     def _safe_call(self):
@@ -149,6 +149,7 @@ def test_nac_tester():
         pass
     else:
         assert False, 'must fail'
+    nc.registry.unregister(SampleNAC)
 
 
 def test_nac_suicide():
@@ -159,6 +160,7 @@ def test_nac_suicide():
     assert state.block.get_balance(SampleNAC.address) == 100
     assert None is nc.tester_call_method(state, sender, SampleNAC.test_suicide)
     assert state.block.get_balance(SampleNAC.address) == 0
+    nc.registry.unregister(SampleNAC)
 
 
 def test_nac_add_property_fail():
@@ -171,6 +173,7 @@ def test_nac_add_property_fail():
         pass
     else:
         assert False, 'properties must not be createable'
+    nc.registry.unregister(SampleNAC)
 
 
 def test_nac_instances():
@@ -196,6 +199,7 @@ def test_nac_instances():
 
     assert c0.afunc(5, 6) == 30
     assert c0.dfunc([4, 8]) == 32
+    nc.registry.unregister(SampleNAC)
 
 
 def test_inheritance():
@@ -272,3 +276,156 @@ def test_events():
     nc.listen_logs(state, Shout)
     c0 = nc.tester_nac(state, tester.k0, EventNAC.address)
     c0.afunc(1, 2)
+
+
+# Storage ###############3
+
+
+def test_typed_storage():
+
+    class TestTSC(nc.TypedStorageContract):
+
+        address = utils.int_to_addr(2050)
+        storage = dict(a=nc.Scalar('uint32'),
+                       b=nc.List('uint16'),
+                       c=nc.Dict('uint32')
+                       )
+
+        def _safe_call(ctx):
+            # skalar
+            assert ctx.a == 0
+            ctx.a = 1
+            assert ctx.a == 1
+
+            ctx.a = 2
+            assert ctx.a == 2
+
+            # list
+            assert isinstance(ctx.b, nc.List)
+            ctx.b[0] = 10
+            assert ctx.b[0] == 10
+
+            ctx.b[1000] = 12
+            assert ctx.b[1000] == 12
+
+            assert len(ctx.b) == 1001
+            ctx.b[1000] = 66
+            assert ctx.b[1000] == 66
+            assert len(ctx.b) == 1001
+
+            ctx.b.append(99)
+            assert len(ctx.b) == 1002
+            ctx.b.append(99)
+            assert len(ctx.b) == 1003
+
+            # mapping
+            assert isinstance(ctx.c, nc.Dict)
+            key = b'test'
+            assert ctx.c[key] == 0
+            ctx.c[key] = 33
+            assert ctx.c[key] == 33
+            ctx.c[key] = 66
+            assert ctx.c[key] == 66
+
+            return 1, 1, []
+
+    nc.registry.register(TestTSC)
+    s = tester.state()
+    r = s._send(tester.k0, TestTSC.address, 0)
+    nc.registry.unregister(TestTSC)
+
+
+def test_nativeabicontract_with_storage():
+
+    class TestTSC(nc.NativeContract):
+
+        address = utils.int_to_addr(2051)
+        storage = dict(size=nc.Scalar('uint32'),
+                       numbers=nc.List('uint32'),
+                       words=nc.Dict('text')
+                       )
+
+        def setup_numbers(ctx, size='uint32', returns=None):
+            ctx.size = size
+            assert isinstance(ctx.numbers, nc.List)
+            for i in range(size):
+                ctx.numbers.append(i)
+
+        def sum_numbers(ctx, returns='uint32'):
+            assert ctx.size == len(ctx.numbers)
+            return sum(ctx.numbers[i] for i in range(len(ctx.numbers)))
+
+        def setup_words(ctx, num='uint32', returns=None):
+            for i in range(num):
+                key = 'key%d' % i
+                word = 'word%d' % i
+                ctx.words[key] = word
+                print 'setup', key, word, repr(ctx.words[key])
+                assert ctx.words[key] == word
+
+        def get_word(ctx, key='bytes', returns='bytes'):
+            r = ctx.words[key]
+            print 'get_word returns', key, r
+            return r
+
+        def muladdsize(ctx, val='uint32', returns='uint32'):
+            ctx.size += val
+            ctx.size *= val
+            return ctx.size
+
+    state = tester.state()
+    nc.registry.register(TestTSC)
+
+    # deploy two instances
+    a0 = nc.tester_create_native_contract_instance(state, tester.k0, TestTSC)
+    a1 = nc.tester_create_native_contract_instance(state, tester.k0, TestTSC)
+
+    # create proxies
+    c0 = nc.tester_nac(state, tester.k0, a0)
+    c1 = nc.tester_nac(state, tester.k0, a1)
+
+    size = 20
+    c0.setup_numbers(size)
+    assert c1.sum_numbers() == 0
+    assert c0.sum_numbers() == sum(range(size))
+    c1.setup_numbers(size)
+    assert c0.sum_numbers() == sum(range(size))
+    assert c1.sum_numbers() == sum(range(size))
+
+    param = 5
+    assert c0.muladdsize(param) == (size + param) * param
+
+    # words
+    c1.setup_words(param)
+    assert c1.get_word(b'key2') == b'word2'
+
+    assert c0.get_word(b'key2') == b''
+    c0.setup_words(param)
+    assert c0.get_word(b'key2') == b'word2'
+
+    nc.registry.unregister(TestTSC)
+
+
+def test_abi_encode():
+
+    def t(v, typ):
+        e = abi.encode_abi([typ], [v])
+        assert e
+        assert len(e) == 32
+        i = utils.big_endian_to_int(e)
+        be = utils.encode_int(i)
+        assert len(be) <= 32
+        e2 = utils.zpad(be, 32)
+        assert len(e2) == 32
+
+        assert len(e) == len(e2)
+        assert e == e2
+        d = abi.decode_abi([typ], e2)[0]
+        assert d
+        assert d == v
+
+    t(1, 'uint32')
+    t(-1, 'int32')
+    t('a', 'string')
+    t('hello', 'string')
+    t('a' * 20, 'address')
