@@ -18,7 +18,6 @@ class EchoContract(nc.NativeContractBase):
     address = utils.int_to_addr(2000)
 
     def _safe_call(self):
-        print "echo contract called" * 10
         res, gas, data = 1, self._msg.gas, self._msg.data.data
         return res, gas, data
 
@@ -36,9 +35,7 @@ def test_echo_contract():
     nc.registry.register(EchoContract)
     s = tester.state()
     testdata = 'hello'
-    print "SENDING DATA"
     r = s._send(tester.k0, EchoContract.address, 0, testdata)
-    print 'DONE'
     assert r['output'] == testdata
     nc.registry.unregister(EchoContract)
 
@@ -202,56 +199,6 @@ def test_nac_instances():
     nc.registry.unregister(SampleNAC)
 
 
-def test_inheritance():
-    pass
-
-
-class OwnedSampleNAC(SampleNAC):
-    address = utils.int_to_addr(2003)
-
-    def default_method(self):
-        if not self._get_storage_data('__owner__'):
-            self._set_storage_data('__owner__', self.tx_origin)
-
-    def owned(f):
-        def _f(self, *args):
-            if self.tx_origin == self._get_storage_data('__owner__'):
-                return f(self, *args)
-            raise RuntimeError('access restricted to owner')
-        return _f
-
-    def pom():
-        print 'om called'
-
-    # @owned   # does not work, as it shadows the signature
-    def access(self, returns='uint8'):
-        return 1
-
-
-def Xtest_owned_decorator():
-    state = tester.state()
-    nc.registry.register(OwnedSampleNAC)
-    func = nc.tester_create_native_contract_instance
-
-    # create an instance of the contract
-    owner = tester.k0
-    oc_a = func(state, owner, OwnedSampleNAC)
-    # the first call will go to default_method and set the owner
-    # owner should be able to successfuly call .access
-    oc_proxy_owner = nc.tester_nac(state, owner, oc_a)
-    assert oc_proxy_owner.access() == 1
-
-    # non owners should not be able to call .access
-    non_owner = tester.k1
-    oc_proxy_non_owner = nc.tester_nac(state, non_owner, oc_a)
-    try:
-        oc_proxy_non_owner.access()
-    except tester.TransactionFailed:
-        pass
-    else:
-        assert False, 'non owner must not access this method'
-
-
 ## Events #########################
 
 class Shout(nc.ABIEvent):
@@ -342,8 +289,7 @@ def test_nativeabicontract_with_storage():
         address = utils.int_to_addr(2051)
         storage = dict(size=nc.Scalar('uint32'),
                        numbers=nc.List('uint32'),
-                       words=nc.Dict('text')
-                       )
+                       words=nc.Dict('bytes'))
 
         def setup_numbers(ctx, size='uint32', returns=None):
             ctx.size = size
@@ -360,12 +306,10 @@ def test_nativeabicontract_with_storage():
                 key = 'key%d' % i
                 word = 'word%d' % i
                 ctx.words[key] = word
-                print 'setup', key, word, repr(ctx.words[key])
                 assert ctx.words[key] == word
 
         def get_word(ctx, key='bytes', returns='bytes'):
             r = ctx.words[key]
-            print 'get_word returns', key, r
             return r
 
         def muladdsize(ctx, val='uint32', returns='uint32'):
@@ -406,26 +350,62 @@ def test_nativeabicontract_with_storage():
     nc.registry.unregister(TestTSC)
 
 
-def test_abi_encode():
+def test_owned():
+
+    class TestTSC(nc.NativeContract):
+
+        address = utils.int_to_addr(2051)
+        storage = dict(owner=nc.Scalar('address'))
+
+        def own(ctx, returns=None):
+            if ctx.owner == '\0' * 20:
+                ctx.owner = ctx.tx_origin
+                assert ctx.owner == ctx.tx_origin
+
+        def assert_owner(ctx):
+            if ctx.tx_origin != ctx.owner:
+                raise RuntimeError('not owner')
+
+        def protected(ctx, returns='uint32'):
+            ctx.assert_owner()
+            return 1
+
+    state = tester.state()
+    nc.registry.register(TestTSC)
+
+    a0 = nc.tester_create_native_contract_instance(state, tester.k0, TestTSC)
+    c0 = nc.tester_nac(state, tester.k0, a0)
+
+    c0.own()
+    assert c0.protected() == 1
+    c0k1 = nc.tester_nac(state, tester.k1, a0)
+    try:
+        c0k1.protected()
+    except tester.TransactionFailed:
+        pass
+    else:
+        assert False, 'must not access protected if not owner'
+
+    nc.registry.unregister(TestTSC)
+
+
+def test_db_encode():
+
+    enc = nc.TypedStorage._db_encode_type
+    dec = nc.TypedStorage._db_decode_type
+
+    assert isinstance(enc('int32', 1), int)
+    assert isinstance(enc('address', '\0' * 20), int)
+    assert isinstance(dec('address', 0), bytes)
 
     def t(v, typ):
-        e = abi.encode_abi([typ], [v])
-        assert e
-        assert len(e) == 32
-        i = utils.big_endian_to_int(e)
-        be = utils.encode_int(i)
-        assert len(be) <= 32
-        e2 = utils.zpad(be, 32)
-        assert len(e2) == 32
+        assert dec(typ, enc(typ, v)) == v, (dec(typ, enc(typ, v)), v)
 
-        assert len(e) == len(e2)
-        assert e == e2
-        d = abi.decode_abi([typ], e2)[0]
-        assert d
-        assert d == v
-
-    t(1, 'uint32')
-    t(-1, 'int32')
-    t('a', 'string')
-    t('hello', 'string')
-    t('a' * 20, 'address')
+    t(1, b'uint32')
+    t(-1, b'int32')
+    t(b'a', b'string')
+    t(b'hello', b'string')
+    t(b'a' * 20, b'address')
+    t(b'abc', b'bytes')
+    t(b'abc', b'string')
+    t(b'abc', b'binary')

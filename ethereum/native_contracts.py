@@ -38,7 +38,7 @@ import processblock
 import vm
 import inspect
 import abi
-from ethereum.utils import encode_int, zpad, big_endian_to_int
+from ethereum.utils import encode_int, zpad, big_endian_to_int, int_to_big_endian
 import traceback
 from slogging import get_logger
 log = get_logger('nativecontracts')
@@ -85,7 +85,7 @@ class Registry(object):
         assert contract.address.startswith(self.native_contract_address_prefix)
         assert contract.address not in self.native_contracts
         self.native_contracts[contract.address] = contract._on_msg
-        print("registered native contract {} at address {}".format(contract, contract.address))
+        log.debug("registered native contract", contract=contract, address=contract.address)
 
     def unregister(self, contract):
         del self.native_contracts[contract.address]
@@ -116,7 +116,8 @@ class NativeContractBase(object):
         try:
             return nac._safe_call()
         except Exception:
-            print ('\n' * 2) + traceback.format_exc()
+            log.error('contract errored', contract=cls.__name__)
+            print(traceback.format_exc())
             return 0, msg.gas, []
 
     def _get_storage_data(self, key):
@@ -150,7 +151,6 @@ class CreateNativeContractInstance(NativeContractBase):
 
         # get native contract
         nc_address = registry.native_contract_address_prefix + self._msg.data.extract_all()[:4]
-        print "IN CNCI", nc_address
         if nc_address not in registry:
             return 0, self._msg.gas, b''
         native_contract = registry[nc_address].im_self
@@ -198,12 +198,10 @@ def abi_encode_return_vals(method, vals):
     assert issubclass(method.im_class, NativeABIContract)
     return_types = method.im_class._get_method_abi(method)[2]
     # encode return value to list
-    print 'aBI RETURN VALs', repr(vals), return_types
     if isinstance(return_types, list):
         assert isinstance(vals, (list, tuple)) and len(vals) == len(return_types)
     elif vals is None:
         assert return_types is None
-        print "in abi return as None"
         return ''
     else:
         vals = (vals, )
@@ -325,7 +323,6 @@ class NativeABIContract(NativeContractBase):
         return 1, self.gas, []
 
     def _safe_call(self):
-        print "in safe call"
         calldata = self._msg.data.extract_all()
         # get method
         m_id = big_endian_to_int(calldata[:4])  # first 4 bytes encode method_id
@@ -334,7 +331,6 @@ class NativeABIContract(NativeContractBase):
             log.warn('method not found, calling default', methodid=m_id)
             return 1, self.gas, []  # no default methods supported
         # decode abi args
-        print 'calldata', method,  calldata[4:], arg_types
         args = abi.decode_abi(arg_types, calldata[4:])
         # call (unbound) method
         try:
@@ -454,8 +450,13 @@ class TypedStorage(object):
     _set = None
     _get = None
 
-    def __init__(self, value_type='unit8'):
+    _valid_types = ['address', 'string', 'bytes', 'binary']
+    _valid_types += ['int%d' % (i * 8) for i in range(1, 33)]
+    _valid_types += ['uint%d' % (i * 8) for i in range(1, 33)]
+
+    def __init__(self, value_type):
         self._value_type = value_type
+        assert value_type in self._valid_types
 
     def setup(self, prefix, getter, setter):
         assert isinstance(prefix, bytes)
@@ -463,19 +464,36 @@ class TypedStorage(object):
         self._set = setter
         self._get = getter
 
+    @classmethod
+    def _db_decode_type(cls, value_type, data):
+        if value_type in ('string', 'bytes', 'binary'):
+            return int_to_big_endian(data)
+        if value_type == 'address':
+            return zpad(int_to_big_endian(data), 20)
+        return abi.decode_abi([value_type], zpad(int_to_big_endian(data), 32))[0]
+
+    @classmethod
+    def _db_encode_type(cls, value_type, val):
+        if value_type in ('string', 'bytes', 'binary', 'address'):
+            assert len(val) <= 32
+            assert isinstance(val, bytes)
+            return big_endian_to_int(val)
+        data = abi.encode_abi([value_type], [val])
+        assert len(data) <= 32
+        return big_endian_to_int(data)
+
     def _key(self, k):
         return b'%s:%s' % (self._prefix, k)
 
     def set(self, k=b'', v=None, value_type=None):
         assert v is not None
-        print "MAINset", repr(k), repr(v), value_type or self._value_type
-        v = abi.encode_abi([value_type or self._value_type], [v])
-        print "MAINset", repr(k), repr(v)
-        self._set(self._key(k), big_endian_to_int(v))
+        value_type = value_type or self._value_type
+        v = self._db_encode_type(value_type, v)
+        self._set(self._key(k), v)
 
     def get(self, k=b'', value_type=None):
-        r = self._get(self._key(k))
-        return abi.decode_abi([value_type or self._value_type], zpad(encode_int(r), 32))[0]
+        value_type = value_type or self._value_type
+        return self._db_decode_type(value_type, self._get(self._key(k)))
 
 
 class Scalar(TypedStorage):
@@ -511,7 +529,6 @@ class Dict(List):
         return self.get(k)
 
     def __setitem__(self, k, v):
-        print "DICT set", k, v
         assert isinstance(k, bytes)
         self.set(k, v)
         assert self.get(k) == v
@@ -548,6 +565,7 @@ class TypedStorageContract(NativeContractBase):
     def _prepare_storage(self, get_storage_data, set_storage_data):
         self.db = dict()
         for k, ts in self.storage.items():
+            assert isinstance(ts, TypedStorage)
             ts.setup(k, get_storage_data, set_storage_data)
             if isinstance(ts, (List, Dict)):
                 setattr(self, k, ts)

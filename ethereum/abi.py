@@ -278,7 +278,6 @@ def encode_abi(types, args):
     for typ, arg in zip(types, args):
         base, sub, arrlist = process_type(typ)
         l, n, v = encode_any(arg, base, sub, arrlist)
-        print typ, arg, repr((l, n, v))
         len_args += l
         normal_args += n
         var_args += v
