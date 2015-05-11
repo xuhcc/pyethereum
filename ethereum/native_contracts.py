@@ -83,7 +83,7 @@ class Registry(object):
         assert issubclass(contract, NativeContractBase)
         assert len(contract.address) == 20
         assert contract.address.startswith(self.native_contract_address_prefix)
-        assert contract.address not in self.native_contracts
+        assert contract.address not in self.native_contracts, 'address already taken'
         self.native_contracts[contract.address] = contract._on_msg
         log.debug("registered native contract", contract=contract, address=contract.address)
 
@@ -331,7 +331,7 @@ class NativeABIContract(NativeContractBase):
             inputs = [dict(name=name, type=typ, indexed=bool(i <= evt.indexed))
                       for i, (name, typ) in enumerate(zip(evt.arg_names, evt.arg_types))]
             contract_abi.append(dict(type='event', name=evt.__name__, inputs=inputs))
-        return json.dumps(contract_abi, indent=2)
+        return contract_abi
 
     @classmethod
     def _abi_methods(cls):
@@ -421,24 +421,36 @@ class ABIEvent(object):
         ctx._ext.log(ctx.address, topics, data)
 
     @classmethod
-    def listen(cls, log, address=None):
+    def listen(cls, log, address=None, callback=None):
         if not len(log.topics) or log.topics[0] != cls.event_id():
             return
         if address and address != log.address:
             return
-        o = {cls.arg_names[i]: abi.decode_abi([cls.arg_types[i]], zpad(encode_int(t), 32))[0]
-             for i, t in enumerate(log.topics[1:])}
+        print log.topics
+        o = {}
+        for i, t in enumerate(log.topics[1:]):
+            name = cls.arg_names[i]
+            print name, t, cls.arg_types[i]
+            if cls.arg_types[i] in ('string', 'bytes'):
+                d = encode_int(t)
+            else:
+                d = zpad(encode_int(t), 32)
+            data = abi.decode_abi([cls.arg_types[i]], d)[0]
+            print name, data
+            o[name] = data
         o['event_type'] = cls.__name__
         unindexed_types = cls.arg_types[cls.indexed:]
         o['args'] = abi.decode_abi(unindexed_types, log.data)
-        print(o)
-        return o
+        if callback:
+            callback(o)
+        else:
+            print(o)
 
 
 #  Tester helpers #####################################
 
-def listen_logs(state, event, address=None):
-    state.block.log_listeners.append(lambda l: event.listen(l, address))
+def listen_logs(state, event, address=None, callback=None):
+    state.block.log_listeners.append(lambda l: event.listen(l, address, callback))
 
 
 def tester_call_method(state, sender, method, *args):
