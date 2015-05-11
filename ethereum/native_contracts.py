@@ -31,7 +31,7 @@ Limitations:
     EXTCODECOPY on an address with a NativeContract
         returns ''
 """
-
+import json
 import specials
 import utils
 import processblock
@@ -183,20 +183,20 @@ registry.register(CreateNativeContractInstance)
 def abi_encode_args(method, args):
     "encode args for method: method_id|data"
     assert issubclass(method.im_class, NativeABIContract), method.im_class
-    method_id, arg_types = method.im_class._get_method_abi(method)[:2]
-    return zpad(encode_int(method_id), 4) + abi.encode_abi(arg_types, args)
+    m_abi = method.im_class._get_method_abi(method)
+    return zpad(encode_int(m_abi['id']), 4) + abi.encode_abi(m_abi['arg_types'], args)
 
 
 def abi_decode_args(method, data):
     # data is payload w/o method_id
     assert issubclass(method.im_class, NativeABIContract), method.im_class
-    arg_types = method.im_class._get_method_abi(method)[1]
+    arg_types = method.im_class._get_method_abi(method)['arg_types']
     return abi.decode_abi(arg_types, data)
 
 
 def abi_encode_return_vals(method, vals):
     assert issubclass(method.im_class, NativeABIContract)
-    return_types = method.im_class._get_method_abi(method)[2]
+    return_types = method.im_class._get_method_abi(method)['return_types']
     # encode return value to list
     if isinstance(return_types, list):
         assert isinstance(vals, (list, tuple)) and len(vals) == len(return_types)
@@ -211,7 +211,7 @@ def abi_encode_return_vals(method, vals):
 
 def abi_decode_return_vals(method, data):
     assert issubclass(method.im_class, NativeABIContract)
-    return_types = method.im_class._get_method_abi(method)[2]
+    return_types = method.im_class._get_method_abi(method)['return_types']
     if not len(data):
         if return_types is None:
             return None
@@ -240,6 +240,7 @@ class NativeABIContract(NativeContractBase):
     Constructor ?
     """
 
+    events = []
     __isfrozen = False
 
     def __init__(self, ext, msg):
@@ -270,6 +271,18 @@ class NativeABIContract(NativeContractBase):
         else:
             self.block_prevhash = '\0' * 32
 
+        # setup events as callable methods on contract
+        def mk_event_method(ctx, evt):
+            def m(*args):
+                return evt(ctx, *args)
+            return m
+
+        for evt in self.events:
+            assert issubclass(evt, ABIEvent)
+            name = evt.__name__
+            assert not hasattr(self, name), 'event name %s collides with member' % name
+            setattr(self, name, mk_event_method(self, evt))
+
         self.__isfrozen = True
 
     @property
@@ -287,14 +300,38 @@ class NativeABIContract(NativeContractBase):
         m_as = inspect.getargspec(method)
         arg_names = list(m_as.args)[1:]
         if 'returns' not in arg_names:  # indicates, this is an abi method
-            return None, None, None
+            return None
         arg_types = list(m_as.defaults)
         assert len(arg_names) == len(arg_types) == len(set(arg_names))
         assert arg_names.pop() == 'returns'  # must be last element
         return_types = arg_types.pop()  # can be list or multiple
         name = method.__func__.func_name
         m_id = abi.method_id(name, arg_types)
-        return (m_id, arg_types, return_types)
+        return dict(id=m_id, arg_types=arg_types, arg_names=arg_names, return_types=return_types,
+                    name=name, method=method)
+
+    @classmethod
+    def json_abi(cls):
+        contract_abi = []
+        # add methods
+        for m in cls._abi_methods():
+            m_abi = cls._get_method_abi(m)
+            d = dict(constant=False, name=m.__name__, type='function', inputs=[], outputs=[])
+            for name, typ in zip(m_abi['arg_names'], m_abi['arg_types']):
+                d['inputs'].append(dict(name=name, type=typ))
+            return_types = m_abi['return_types']
+            if not isinstance(return_types, list):
+                return_types = [return_types]
+            for i, typ in enumerate(return_types):
+                if typ is not None:
+                    d['outputs'].append(dict(name='z{}'.format(i), type=typ))
+            contract_abi.append(d)
+        # add events
+        for evt in cls.events:
+            inputs = [dict(name=name, type=typ, indexed=bool(i <= evt.indexed))
+                      for i, (name, typ) in enumerate(zip(evt.arg_names, evt.arg_types))]
+            contract_abi.append(dict(type='event', name=evt.__name__, inputs=inputs))
+        return json.dumps(contract_abi, indent=2)
 
     @classmethod
     def _abi_methods(cls):
@@ -302,8 +339,7 @@ class NativeABIContract(NativeContractBase):
         for name in dir(cls):
             method = getattr(cls, name)
             if inspect.ismethod(method):
-                m_abi = cls._get_method_abi(method)
-                if m_abi[0]:
+                if cls._get_method_abi(method):
                     methods.append(method)
         return methods
 
@@ -311,9 +347,8 @@ class NativeABIContract(NativeContractBase):
     def _find_method(cls, method_id):
         for method in cls._abi_methods():
             m_abi = cls._get_method_abi(method)
-            if m_abi[0] and m_abi[0] == method_id:
-                return method, m_abi[1], m_abi[2]
-        return None, None, None
+            if m_abi and m_abi['id'] == method_id:
+                return m_abi
 
     def default_method(self):
         """
@@ -326,13 +361,14 @@ class NativeABIContract(NativeContractBase):
         calldata = self._msg.data.extract_all()
         # get method
         m_id = big_endian_to_int(calldata[:4])  # first 4 bytes encode method_id
-        method, arg_types, return_types = self._find_method(m_id)
-        if not method:  # 404 method not found
+        m_abi = self._find_method(m_id)
+        if not m_abi:  # 404 method not found
             log.warn('method not found, calling default', methodid=m_id)
             return 1, self.gas, []  # no default methods supported
         # decode abi args
-        args = abi.decode_abi(arg_types, calldata[4:])
+        args = abi.decode_abi(m_abi['arg_types'], calldata[4:])
         # call (unbound) method
+        method = m_abi['method']
         try:
             res = method(self, *args)
         except RuntimeError as e:

@@ -209,9 +209,10 @@ class Shout(nc.ABIEvent):
 
 class EventNAC(nc.NativeABIContract):
     address = utils.int_to_addr(2005)
+    events = [Shout]
 
     def afunc(ctx, a='uint16', b='uint16', returns=None):
-        Shout(ctx, a, b, 3)
+        ctx.Shout(a, b, 3)
 
 
 def test_events():
@@ -223,6 +224,12 @@ def test_events():
     nc.listen_logs(state, Shout)
     c0 = nc.tester_nac(state, tester.k0, EventNAC.address)
     c0.afunc(1, 2)
+
+
+## json abi ##############################
+
+def test_jsonabi():
+    print EventNAC.json_abi()
 
 
 # Storage ###############3
