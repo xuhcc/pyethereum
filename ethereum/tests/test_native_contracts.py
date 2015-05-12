@@ -241,10 +241,9 @@ def test_typed_storage():
     class TestTSC(nc.TypedStorageContract):
 
         address = utils.int_to_addr(2050)
-        storage = dict(a=nc.Scalar('uint32'),
-                       b=nc.List('uint16'),
-                       c=nc.Dict('uint32')
-                       )
+        a = nc.Scalar('uint32')
+        b = nc.List('uint16')
+        c = nc.Dict('uint32')
 
         def _safe_call(ctx):
             # skalar
@@ -295,9 +294,9 @@ def test_nativeabicontract_with_storage():
     class TestTSC(nc.NativeContract):
 
         address = utils.int_to_addr(2051)
-        storage = dict(size=nc.Scalar('uint32'),
-                       numbers=nc.List('uint32'),
-                       words=nc.Dict('bytes'))
+        size = nc.Scalar('uint32')
+        numbers = nc.List('uint32')
+        words = nc.Dict('bytes')
 
         def setup_numbers(ctx, size='uint32', returns=None):
             ctx.size = size
@@ -363,7 +362,7 @@ def test_owned():
     class TestTSC(nc.NativeContract):
 
         address = utils.int_to_addr(2051)
-        storage = dict(owner=nc.Scalar('address'))
+        owner=nc.Scalar('address')
 
         def own(ctx, returns=None):
             if ctx.owner == '\0' * 20:

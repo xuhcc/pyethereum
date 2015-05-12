@@ -619,9 +619,19 @@ class TypedStorageContract(NativeContractBase):
         self._prepare_storage(self._get_storage_data, self._set_storage_data)
 
     def _prepare_storage(self, get_storage_data, set_storage_data):
-        self.db = dict()
-        for k, ts in self.storage.items():
-            assert isinstance(ts, TypedStorage)
+
+        # move TypedStorage members to _protected (so we can reinitialize them later).
+        def slots():
+            return [(k, ts) for k, ts in self.__class__.__dict__.items()
+                    if isinstance(ts, TypedStorage)]
+        for k, ts in slots():
+            if not k.startswith('_'):
+                setattr(self.__class__, '_' + k, ts)
+                delattr(self.__class__, k)
+        # create members (on each invocation!)
+        for k, ts in slots():
+            assert k.startswith('_')
+            k = k[1:]
             ts.setup(k, get_storage_data, set_storage_data)
             if isinstance(ts, (List, Dict)):
                 setattr(self, k, ts)
@@ -632,8 +642,8 @@ class TypedStorageContract(NativeContractBase):
                     return property(lambda s: skalar.get(), lambda s, v: skalar.set(v=v))
                 setattr(self.__class__, k, _mk_property(ts))
 
-
 # The NativeContract Class ###################
+
 
 class NativeContract(NativeABIContract, TypedStorageContract):
     pass
