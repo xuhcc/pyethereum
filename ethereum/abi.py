@@ -302,7 +302,7 @@ def getlen(base, sub, arrlist):
 
 def decode_single(data, base, sub):
     if base == 'address':
-        return encode_hex(data[12:])
+        return data[12:]  # FIXME, why should this be hex encoded???
     elif base == 'string' or base == 'bytes' or base == 'hash':
         return data[:int(sub)] if len(sub) else data
     elif base == 'uint':

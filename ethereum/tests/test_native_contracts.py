@@ -202,9 +202,10 @@ def test_nac_instances():
 ## Events #########################
 
 class Shout(nc.ABIEvent):
-    arg_types = ['uint16', 'uint16', 'uint16']
-    arg_names = ['a', 'b', 'c']
-    indexed = 1  # up to which arg_index args should be indexed
+    args = [dict(name='a', type='uint16', indexed=True),
+            dict(name='b', type='uint16', indexed=False),
+            dict(name='c', type='uint16', indexed=False),
+            ]
 
 
 class EventNAC(nc.NativeABIContract):

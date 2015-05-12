@@ -34,6 +34,7 @@ Limitations:
 import json
 import specials
 import utils
+from utils import DEBUG
 import processblock
 import vm
 import inspect
@@ -328,9 +329,7 @@ class NativeABIContract(NativeContractBase):
             contract_abi.append(d)
         # add events
         for evt in cls.events:
-            inputs = [dict(name=name, type=typ, indexed=bool(i <= evt.indexed))
-                      for i, (name, typ) in enumerate(zip(evt.arg_names, evt.arg_types))]
-            contract_abi.append(dict(type='event', name=evt.__name__, inputs=inputs))
+            contract_abi.append(dict(type='event', name=evt.__name__, inputs=evt.args))
         return contract_abi
 
     @classmethod
@@ -391,31 +390,40 @@ class ABIEvent(object):
     https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI#events
 
     class Shout(nc.ABIEvent):
-        arg_types = ['uint16', 'uint16', 'uint16']
-        indexed = 1  # up to which arg_index args should be indexed
+        args = [dict(name='a', type='utint16', indexed=True), ...]
     """
 
-    arg_types = []
-    arg_names = []
-    indexed = 0
+    args = []
+
+    @classmethod
+    def arg_types(cls):
+        return [a['type'] for a in cls.args]
 
     @classmethod
     def event_id(cls):
-        return abi.method_id(cls.__name__, cls.arg_types)
+        return abi.method_id(cls.__name__, cls.arg_types())
 
     def __init__(self, ctx, *args):
         assert isinstance(ctx, NativeABIContract)
-        assert len(self.arg_types) == len(args)
+        assert len(self.args) == len(args)
 
         # topic0 sha3(EventName + signature)
         topics = [self.event_id()]
 
+        indexed_args = []
+        non_indexed_args = []
+        for val, arg in zip(args, self.args):
+            if arg['indexed']:
+                indexed_args.append((arg['type'], val))
+            else:
+                non_indexed_args.append((arg['type'], val))
+
+        assert len(indexed_args) <= 3
         # topics 1-n
-        for i in range(min(self.indexed, 3)):
-            topics.append(big_endian_to_int(abi.encode_abi([self.arg_types[i]], [args[i]])))
+        for typ, val in indexed_args:
+            topics.append(big_endian_to_int(abi.encode_abi([typ], [val])))
         # remaining non indexed data
-        i = len(topics) - 1
-        data = abi.encode_abi(self.arg_types[i:], args[i:])
+        data = abi.encode_abi([a[0] for a in non_indexed_args], [a[1] for a in non_indexed_args])
 
         # add log
         ctx._ext.log(ctx.address, topics, data)
@@ -426,20 +434,17 @@ class ABIEvent(object):
             return
         if address and address != log.address:
             return
-        print log.topics
         o = {}
         for i, t in enumerate(log.topics[1:]):
-            name = cls.arg_names[i]
-            print name, t, cls.arg_types[i]
-            if cls.arg_types[i] in ('string', 'bytes'):
+            name = cls.args[i]['name']
+            if cls.arg_types()[i] in ('string', 'bytes'):
                 d = encode_int(t)
             else:
                 d = zpad(encode_int(t), 32)
-            data = abi.decode_abi([cls.arg_types[i]], d)[0]
-            print name, data
+            data = abi.decode_abi([cls.arg_types()[i]], d)[0]
             o[name] = data
         o['event_type'] = cls.__name__
-        unindexed_types = cls.arg_types[cls.indexed:]
+        unindexed_types = [a['type'] for a in cls.args if not a['indexed']]
         o['args'] = abi.decode_abi(unindexed_types, log.data)
         if callback:
             callback(o)
@@ -568,6 +573,9 @@ class List(TypedStorage):
 
     def __contains__(self, idx):
         raise NotImplementedError()
+
+    def __iter__(self):
+        return (self[i] for i in range(len(self)))
 
 
 class Dict(List):
