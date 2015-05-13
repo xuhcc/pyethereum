@@ -3,7 +3,8 @@ from ethereum import utils
 from ethereum import native_contracts as nc
 from ethereum import abi
 import logging
-logging.NOTSET = logging.DEBUG
+logging.NOTSET = logging.INFO
+tester.disable_logging()
 
 """
 test registration
@@ -362,7 +363,7 @@ def test_owned():
     class TestTSC(nc.NativeContract):
 
         address = utils.int_to_addr(2051)
-        owner=nc.Scalar('address')
+        owner = nc.Scalar('address')
 
         def own(ctx, returns=None):
             if ctx.owner == '\0' * 20:

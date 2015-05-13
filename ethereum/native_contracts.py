@@ -36,6 +36,8 @@ import specials
 import utils
 from utils import DEBUG
 import processblock
+import transactions
+import processblock
 import vm
 import inspect
 import abi
@@ -90,6 +92,10 @@ class Registry(object):
 
     def unregister(self, contract):
         del self.native_contracts[contract.address]
+
+    def abi_contracts(self):
+        return [c.im_self for c in self.native_contracts.values()
+                if hasattr(c, 'im_self') and issubclass(c.im_self, NativeContract)]
 
     def __contains__(self, address):
         nca = self.native_contract_address_prefix + address[-4:]
@@ -250,6 +256,7 @@ class NativeABIContract(NativeContractBase):
         # copy special variables
         self.msg_data = msg.data.extract_all()
         self.msg_sender = msg.sender
+        self.msg_depth = msg.depth  # public?
         self.msg_gas = property(lambda: self._gas)
         self.msg_value = msg.value
 
@@ -295,6 +302,12 @@ class NativeABIContract(NativeContractBase):
         self._ext.set_balance(address, self.get_balance(address) + self.balance)
         self._ext.set_balance(self.address, 0)
         self._ext.add_suicide(self.address)
+
+    def call(self, to, abi_contract_method, *args, value=0):
+        data = abi_encode_args(abi_contract_method, args)
+        msg = processblock.Message(self.address, to, value, self._gas, data,
+                                   self.msg_depth + 1, code_address=to)
+        res = self._ext.msg(self._ext, msg)  # FIXME
 
     @classmethod
     def _get_method_abi(cls, method):
@@ -368,11 +381,13 @@ class NativeABIContract(NativeContractBase):
         args = abi.decode_abi(m_abi['arg_types'], calldata[4:])
         # call (unbound) method
         method = m_abi['method']
+        log.debug('calling', method=method.__name__, args=args)
         try:
             res = method(self, *args)
         except RuntimeError as e:
             log.warn("error in method", method=method, error=e)
             return 0, self.gas, []
+        log.debug('call returned', result=res)
         return 1, self.gas, memoryview(abi_encode_return_vals(method, res)).tolist()
 
     def __setattr__(self, key, value):
@@ -466,7 +481,7 @@ def tester_call_method(state, sender, method, *args):
 
 
 def tester_nac(state, sender, address, value=0):
-    "create an object which acts as a porxy for the contract"
+    "create an object which acts as a proxy for the contract on tester"
     klass = registry[address].im_self
     assert issubclass(klass, NativeABIContract)
 
@@ -475,6 +490,60 @@ def tester_nac(state, sender, address, value=0):
             data = abi_encode_args(method, args)
             r = state._send(sender, address, value=value, evmdata=data)['output']
             return abi_decode_return_vals(method, r)
+        return m
+
+    class cproxy(object):
+        pass
+    for m in klass._abi_methods():
+        setattr(cproxy, m.__func__.func_name, mk_method(m))
+
+    return cproxy()
+
+
+from ethereum.transactions import Transaction
+
+
+def test_call(block, sender, to, data='', gasprice=0, value=0):
+    state_root_before = block.state_root
+    assert block.has_parent()
+    # rebuild block state before finalization
+    parent = block.get_parent()
+    test_block = block.init_from_parent(parent, block.coinbase,
+                                        timestamp=block.timestamp)
+    for _tx in block.get_transactions():
+        success, output = processblock.apply_transaction(test_block, _tx)
+        assert success
+    # apply transaction
+    startgas = block.gas_limit - block.gas_used
+    gasprice = 0
+    nonce = test_block.get_nonce(sender)
+    tx = Transaction(nonce, gasprice, startgas, to, value, data)
+    tx.sender = sender
+
+    try:
+        success, output = processblock.apply_transaction(test_block, tx)
+    except processblock.InvalidTransaction as e:
+        success = False
+    assert block.state_root == state_root_before
+    if success:
+        return output
+    else:
+        log.debug('test_call failed', error=e)
+        return None
+
+
+def chain_nac_proxy(chain, sender, contract_address, value=0):
+    "create an object which acts as a proxy for the contract on the chain"
+    klass = registry[contract_address].im_self
+    assert issubclass(klass, NativeABIContract)
+
+    def mk_method(method):
+        def m(s, *args):
+            data = abi_encode_args(method, args)
+            block = chain.head_candidate
+            output = test_call(block, sender, contract_address, data)
+            if output is not None:
+                return abi_decode_return_vals(method, output)
         return m
 
     class cproxy(object):

@@ -164,7 +164,7 @@ class state():
         tx.sign(sender)
         if gas is not None:
             tx.startgas = gas
-        print('starting', tx.startgas, gas_limit)
+        #print('starting', tx.startgas, gas_limit)
         (s, a) = pb.apply_transaction(self.block, tx)
         if not s:
             raise ContractCreationFailed()
