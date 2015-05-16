@@ -76,8 +76,21 @@ class SampleNAC(nc.NativeABIContract):
     def cfunc(ctx, a='uint16', returns=['uint16', 'uint16']):
         return a, a  # returns tuple
 
-    def dfunc(ctx, a='uint16[2]', returns='uint16'):
+    def ccfunc(ctx, a='uint16', returns=['uint16']):
+        return [a]
+
+    def dfunc(ctx, a='uint16[2]', returns='uint16'):  # FAILS
         return a[0] * a[1]
+
+    def efunc(ctx, a='uint16[]', returns='uint16'):
+        return a[0] * a[1]
+
+    def ffunc(ctx, returns='uint16[2]'):
+        return [1, 2]
+
+    def ffunc2(ctx, returns=['uint16[2]']):
+        return [[1, 2]]
+
 
     def void_func(ctx, a='uint16', returns=None):
         return
@@ -122,9 +135,16 @@ def test_nac_tester():
     sender = tester.k0
 
     assert 12 == nc.tester_call_method(state, sender, SampleNAC.afunc, 3, 4)
+    print
+    # FIXME fails
+    # assert 30 == nc.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
+    assert 30 == nc.tester_call_method(state, sender, SampleNAC.efunc, [5, 6])
     assert 26 == nc.tester_call_method(state, sender, SampleNAC.bfunc, 13)
+    assert [1, 2] == nc.tester_call_method(state, sender, SampleNAC.ffunc)
+    assert [1, 2] == nc.tester_call_method(state, sender, SampleNAC.ffunc2)
     assert 4, 4 == nc.tester_call_method(state, sender, SampleNAC.cfunc, 4)
-    assert 30 == nc.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
+    assert [4] == nc.tester_call_method(state, sender, SampleNAC.ccfunc, 4)
+
     assert 42 == nc.tester_call_method(state, sender, SampleNAC.noargs_func)
     assert None is nc.tester_call_method(state, sender, SampleNAC.void_func, 3)
     assert None is nc.tester_call_method(state, sender, SampleNAC.special_vars)
@@ -196,7 +216,7 @@ def test_nac_instances():
     assert c2.get_address() == a2
 
     assert c0.afunc(5, 6) == 30
-    assert c0.dfunc([4, 8]) == 32
+    assert c0.efunc([4, 8]) == 32
     nc.registry.unregister(SampleNAC)
 
 

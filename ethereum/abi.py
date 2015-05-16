@@ -17,6 +17,11 @@ def method_id(name, encode_types):
     return big_endian_to_int(utils.sha3(sig)[:4])
 
 
+def event_id(name, encode_types):
+    sig = name + '(' + ','.join(encode_types) + ')'
+    return big_endian_to_int(utils.sha3(sig))
+
+
 class ContractTranslator():
 
     def __init__(self, full_signature):
@@ -38,13 +43,12 @@ class ContractTranslator():
                 sys.stderr.write("Warning: multiple methods with the same "
                                  " name. Use %s to call %s with types %r"
                                  % (name, sig_item['name'], encode_types))
-            m_id = method_id(name, encode_types)
             if sig_item['type'] == 'function':
                 decode_types = [f['type'] for f in sig_item['outputs']]
                 is_unknown_type = len(sig_item['outputs']) and \
                     sig_item['outputs'][0]['name'] == 'unknown_out'
                 self.function_data[name] = {
-                    "prefix": m_id,
+                    "prefix": method_id(name, encode_types),
                     "encode_types": encode_types,
                     "decode_types": decode_types,
                     "is_unknown_type": is_unknown_type
@@ -52,7 +56,7 @@ class ContractTranslator():
             elif sig_item['type'] == 'event':
                 indexed = [f['indexed'] for f in sig_item['inputs']]
                 names = [f['name'] for f in sig_item['inputs']]
-                self.event_data[m_id] = {
+                self.event_data[event_id(name, encode_types)] = {
                     "types": encode_types,
                     "name": name,
                     "names": names,

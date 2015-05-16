@@ -303,7 +303,7 @@ class NativeABIContract(NativeContractBase):
         self._ext.set_balance(self.address, 0)
         self._ext.add_suicide(self.address)
 
-    def call(self, to, abi_contract_method, *args, value=0):
+    def call(self, to, abi_contract_method, args=[], value=0):
         data = abi_encode_args(abi_contract_method, args)
         msg = processblock.Message(self.address, to, value, self._gas, data,
                                    self.msg_depth + 1, code_address=to)
