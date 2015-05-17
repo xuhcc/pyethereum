@@ -24,3 +24,5 @@ from ethereum import processblock
 from ethereum import tester
 from ethereum import abi
 from ethereum import ethash'''
+
+import native_contracts

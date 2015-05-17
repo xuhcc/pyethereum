@@ -91,6 +91,9 @@ class SampleNAC(nc.NativeABIContract):
     def ffunc2(ctx, returns=['uint16[2]']):
         return [[1, 2]]
 
+    def gfunc(ctx, returns='address[]'):
+        return ['\x00' * 20] * 3
+
 
     def void_func(ctx, a='uint16', returns=None):
         return
@@ -138,6 +141,7 @@ def test_nac_tester():
     print
     # FIXME fails
     # assert 30 == nc.tester_call_method(state, sender, SampleNAC.dfunc, [5, 6])
+    assert ['0' * 40] * 3 == nc.tester_call_method(state, sender, SampleNAC.gfunc)
     assert 30 == nc.tester_call_method(state, sender, SampleNAC.efunc, [5, 6])
     assert 26 == nc.tester_call_method(state, sender, SampleNAC.bfunc, 13)
     assert [1, 2] == nc.tester_call_method(state, sender, SampleNAC.ffunc)

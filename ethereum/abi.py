@@ -201,8 +201,7 @@ def encode_single(typ, arg):
             raise EncodingError("Could not parse hash: %r" % arg)
     # Addresses: address (== hash160)
     elif base == 'address':
-        if not (int(sub) and int(sub) <= 32):
-            raise EncodingError("too long: %r" % arg)
+        assert sub == ''
         if isinstance(arg, int):
             return zpad(encode_int(arg), 32)
         elif len(arg) == 20:
@@ -212,6 +211,7 @@ def encode_single(typ, arg):
         else:
             raise EncodingError("Could not parse address: %r" % arg)
     raise EncodingError("Unhandled type: %r %r" % (base, sub))
+
 
 
 def process_type(typ):

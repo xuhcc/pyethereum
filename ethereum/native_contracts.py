@@ -89,6 +89,7 @@ class Registry(object):
         assert contract.address not in self.native_contracts, 'address already taken'
         self.native_contracts[contract.address] = contract._on_msg
         log.debug("registered native contract", contract=contract, address=contract.address)
+        print "registered native contract"
 
     def unregister(self, contract):
         del self.native_contracts[contract.address]
@@ -102,6 +103,7 @@ class Registry(object):
         return self.is_instance_address(address) and nca in self.native_contracts
 
     def __getitem__(self, address):
+        print 'returning native contract', self.address_to_native_contract_class(address)
         return self.address_to_native_contract_class(address)
 
 # set registry
@@ -729,8 +731,25 @@ address.call
     def shared(): - executed before running init and user functions
     def code(): - executed before any user functions
 
-constants
+constant
 stop
 
-modifiers, @nca.isowner
+modifiers
+@nca.isowner
+@nca.constant
 """
+
+class AddressNAC(NativeABIContract):
+    address = utils.int_to_addr(5000)
+
+    def getit(ctx, returns='address[]'):
+        print "GETIT CALLED"
+        return ['\x00' * 20] * 3
+
+registry.register(AddressNAC)
+
+import json
+print json.dumps(AddressNAC.json_abi(), indent=2)
+print AddressNAC.address.encode('hex')
+
+

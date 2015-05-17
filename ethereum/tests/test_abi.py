@@ -4,6 +4,12 @@ from ethereum.slogging import get_logger
 import ethereum.abi as abi
 logger = get_logger()
 
+def test_abi_encode_var_sized_array():
+    d = ['0' * 40] * 3
+    r  = abi.encode_abi(['address[]'], [d])
+    assert abi.decode_abi(['address[]'], r)[0] == d
+
+
 def test_abi_encode_fixed_size_array():
     abi.encode_abi(['uint16[2]'], [[5, 6]])
 
