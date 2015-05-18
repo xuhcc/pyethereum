@@ -72,7 +72,7 @@ class Registry(object):
         return addr
 
     def is_instance_address(self, address):
-        assert isinstance(address, bytes) and len(address) == 20
+        assert isinstance(address, bytes) and len(address) in (20, 0)
         return address.startswith(self.native_contract_instance_address_prefix)
 
     def address_to_native_contract_class(self, address):
