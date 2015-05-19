@@ -189,6 +189,19 @@ registry.register(CreateNativeContractInstance)
 
 #   helper to de/encode method calls
 
+_abi_decode_single_orig = abi.decode_single
+
+
+def _abi_decode_single_patch(typ, val):
+    r = _abi_decode_single_orig(typ, val)
+    if typ[0] == 'address':
+        assert len(r) in (0, 40)
+        r = r.decode('hex')
+    return r
+
+abi.decode_single = _abi_decode_single_patch
+
+
 def abi_encode_args(method, args):
     "encode args for method: method_id|data"
     assert issubclass(method.im_class, NativeABIContract), method.im_class
@@ -739,6 +752,7 @@ modifiers
 @nca.constant
 """
 
+
 class AddressNAC(NativeABIContract):
     address = utils.int_to_addr(5000)
 
@@ -751,5 +765,3 @@ registry.register(AddressNAC)
 import json
 print json.dumps(AddressNAC.json_abi(), indent=2)
 print AddressNAC.address.encode('hex')
-
-
