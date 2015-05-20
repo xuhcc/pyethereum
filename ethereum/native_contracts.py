@@ -87,7 +87,6 @@ class Registry(object):
         assert contract.address not in self.native_contracts, 'address already taken'
         self.native_contracts[contract.address] = contract._on_msg
         log.debug("registered native contract", contract=contract, address=contract.address)
-        print "registered native contract"
 
     def unregister(self, contract):
         del self.native_contracts[contract.address]
@@ -278,6 +277,7 @@ class NativeABIContract(NativeContractBase):
 
         self.block_coinbase = ext.block_coinbase
         self.block_timestamp = ext.block_timestamp
+        self.now = ext.block_timestamp
 
         self.block_difficulty = ext.block_difficulty
         self.block_number = ext.block_number
@@ -436,7 +436,7 @@ class ABIEvent(object):
 
     @classmethod
     def event_id(cls):
-        return abi.method_id(cls.__name__, cls.arg_types())
+        return abi.event_id(cls.__name__, cls.arg_types())
 
     def __init__(self, ctx, *args):
         assert isinstance(ctx, NativeABIContract)
@@ -759,15 +759,15 @@ modifiers
 """
 
 
-class AddressNAC(NativeABIContract):
-    address = utils.int_to_addr(5000)
+# class AddressNAC(NativeABIContract):
+#     address = utils.int_to_addr(5000)
 
-    def getit(ctx, returns='address[]'):
-        print "GETIT CALLED"
-        return ['\x00' * 20] * 3
+#     def getit(ctx, returns='address[]'):
+#         print "GETIT CALLED"
+#         return ['\x00' * 20] * 3
 
-registry.register(AddressNAC)
+# registry.register(AddressNAC)
 
-import json
-print json.dumps(AddressNAC.json_abi(), indent=2)
-print AddressNAC.address.encode('hex')
+# import json
+# print json.dumps(AddressNAC.json_abi(), indent=2)
+# print AddressNAC.address.encode('hex')

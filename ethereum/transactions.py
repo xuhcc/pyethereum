@@ -115,7 +115,8 @@ class Transaction(rlp.Serializable):
 
     def log_dict(self):
         d = self.to_dict()
-        d['sender'] = d['sender'].encode('hex')
+        if d['sender']:
+            d['sender'] = d['sender'].encode('hex')
         d['to'] = d['to'].encode('hex')
         return d
 
