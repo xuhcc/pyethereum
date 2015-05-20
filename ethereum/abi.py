@@ -11,14 +11,25 @@ def json_decode(x):
     return yaml.safe_load(x)
 
 
+def _canonical_name(x):
+    if x.startswith('int['):
+        return 'uint256' + x[3:]
+    elif x == 'int':
+        return 'uint256'
+    elif x.startswith('real['):
+        return 'real128x128' + x[4:]
+    elif x == 'real':
+        return 'real128x128'
+    return x
+
+
 def method_id(name, encode_types):
-    ""
-    sig = name + '(' + ','.join(encode_types) + ')'
+    sig = name + '(' + ','.join(_canonical_name(x) for x in encode_types) + ')'
     return big_endian_to_int(utils.sha3(sig)[:4])
 
 
 def event_id(name, encode_types):
-    sig = name + '(' + ','.join(encode_types) + ')'
+    sig = name + '(' + ','.join(_canonical_name(x) for x in encode_types) + ')'
     return big_endian_to_int(utils.sha3(sig))
 
 
