@@ -318,11 +318,18 @@ class NativeABIContract(NativeContractBase):
         self._ext.set_balance(self.address, 0)
         self._ext.add_suicide(self.address)
 
-    def call(self, to, abi_contract_method, args=[], value=0):
+    def call_abi(self, to, abi_contract_method, *args, **kargs):
+        assert set(kargs.keys()).issubset(set(('value',)))
+        value = kargs.get('value', 0)
         data = abi_encode_args(abi_contract_method, args)
-        msg = processblock.Message(self.address, to, value, self._gas, data,
-                                   self.msg_depth + 1, code_address=to)
-        res = self._ext.msg(self._ext, msg)  # FIXME
+        data = vm.CallData(memoryview(data).tolist())
+        msg = vm.Message(self.address, to, value, self.gas, data,
+                         self.msg_depth + 1, code_address=to)
+        success, self.gas, out = self._ext.msg(msg)
+        assert success  # FIXME
+        out = ''.join(chr(x) for x in out)
+        return abi_decode_return_vals(abi_contract_method, out)
+
 
     @classmethod
     def _get_method_abi(cls, method):
@@ -435,7 +442,8 @@ class ABIEvent(object):
 
     def __init__(self, ctx, *args):
         assert isinstance(ctx, NativeABIContract)
-        assert len(self.args) == len(args)
+        assert len(self.args) == len(args), \
+            "%s called with wrong number of args" % self.__class__.__name__
 
         # topic0 sha3(EventName + signature)
         topics = [self.event_id()]
