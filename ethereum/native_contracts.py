@@ -36,8 +36,6 @@ import specials
 import utils
 from utils import DEBUG
 import processblock
-import transactions
-import processblock
 import vm
 import inspect
 import abi
