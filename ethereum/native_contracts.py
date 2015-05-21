@@ -145,6 +145,9 @@ class CreateNativeContractInstance(NativeContractBase):
     msg.data[:4] defines the native contract
     msg.data[4:] is sent as data to the new contract
 
+    call with last 4 bytes of the address of the contract for which an instance should be created. 
+    i.e.  msg.data = ContractClass.address[-4:]
+
     called by _apply_message
         value was added to this contract (needs to be moved)
     """
@@ -241,6 +244,13 @@ def abi_decode_return_vals(method, data):
         return abi.decode_abi(return_types, data)
 
 
+def constant(f):
+    """
+    decorator to mark methods as constant
+    """
+    f.is_constant = True
+    return f
+
 class NativeABIContract(NativeContractBase):
 
     """
@@ -256,7 +266,7 @@ class NativeABIContract(NativeContractBase):
     The special method NativeABIContract is the constructor
     which is run during creation of the contract and cannot be called afterwards.
 
-    Constructor ?
+    For constant methods, mark them with the @constant decorator
     """
 
     events = []
@@ -350,7 +360,7 @@ class NativeABIContract(NativeContractBase):
         # add methods
         for m in cls._abi_methods():
             m_abi = cls._get_method_abi(m)
-            d = dict(constant=False, name=m.__name__, type='function', inputs=[], outputs=[])
+            d = dict(constant=getattr(m,'is_constant',False), name=m.__name__, type='function', inputs=[], outputs=[])
             for name, typ in zip(m_abi['arg_names'], m_abi['arg_types']):
                 d['inputs'].append(dict(name=name, type=typ))
             return_types = m_abi['return_types']
@@ -364,6 +374,9 @@ class NativeABIContract(NativeContractBase):
         for evt in cls.events:
             contract_abi.append(dict(type='event', name=evt.__name__, inputs=evt.args))
         return contract_abi
+
+    abi = json_abi
+
 
     @classmethod
     def _abi_methods(cls):

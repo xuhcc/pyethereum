@@ -401,9 +401,15 @@ def test_owned():
             if ctx.tx_origin != ctx.owner:
                 raise RuntimeError('not owner')
 
+        @nc.constant
         def protected(ctx, returns='uint32'):
             ctx.assert_owner()
             return 1
+
+
+
+    assert TestTSC.protected.is_constant == True
+
 
     state = tester.state()
     nc.registry.register(TestTSC)

@@ -62,7 +62,8 @@ class ContractTranslator():
                     "prefix": method_id(name, encode_types),
                     "encode_types": encode_types,
                     "decode_types": decode_types,
-                    "is_unknown_type": is_unknown_type
+                    "is_unknown_type": is_unknown_type,
+                    "is_constant": sig_item.get('constant', False)
                 }
             elif sig_item['type'] == 'event':
                 indexed = [f['indexed'] for f in sig_item['inputs']]
@@ -72,6 +73,7 @@ class ContractTranslator():
                     "name": name,
                     "names": names,
                     "indexed": indexed,
+                    "anonymous": sig_item.get('anonymous', False)
                 }
 
     def encode(self, name, args):
