@@ -43,6 +43,7 @@ class ContractTranslator():
             full_signature = json_decode(full_signature)
         for sig_item in full_signature:
             encode_types = [f['type'] for f in sig_item['inputs']]
+            signature = [(f['type'], f['name']) for f in sig_item['inputs']]
             name = sig_item['name']
             if '(' in name:
                 name = name[:name.find('(')]
@@ -64,6 +65,7 @@ class ContractTranslator():
                     "decode_types": decode_types,
                     "is_unknown_type": is_unknown_type,
                     "is_constant": sig_item.get('constant', False)
+                    "signature": signature
                 }
             elif sig_item['type'] == 'event':
                 indexed = [f['indexed'] for f in sig_item['inputs']]
@@ -80,11 +82,10 @@ class ContractTranslator():
         fdata = self.function_data[name]
         o = zpad(encode_int(fdata['prefix']), 4) + \
             encode_abi(fdata['encode_types'], args)
-        print 'in', o.encode('hex')
         return o
 
     def decode(self, name, data):
-        print 'out', data.encode('hex')
+        # print 'out', data.encode('hex')
         fdata = self.function_data[name]
         if fdata['is_unknown_type']:
             o = [utils.to_signed(utils.big_endian_to_int(data[i:i + 32]))
@@ -105,7 +106,7 @@ class ContractTranslator():
         indexed = self.event_data[log.topics[0]]['indexed']
         unindexed_types = [types[i] for i in range(len(types))
                            if not indexed[i]]
-        #print('listen', log.data.encode('hex'))
+        # print('listen', log.data.encode('hex'))
         deserialized_args = decode_abi(unindexed_types, log.data)
         o = {}
         c1, c2 = 0, 0
@@ -168,6 +169,10 @@ def encode_single(typ, arg):
         if not 0 <= i < 2**sub:
             raise ValueOutOfBounds(repr(arg))
         return zpad(encode_int(i), 32)
+    # bool: int<sz>
+    elif base == 'bool':
+        assert isinstance(arg, bool)
+        return zpad(encode_int(int(arg)), 32)
     # Signed integers: int<sz>
     elif base == 'int':
         sub = int(sub)
@@ -225,7 +230,6 @@ def encode_single(typ, arg):
         else:
             raise EncodingError("Could not parse address: %r" % arg)
     raise EncodingError("Unhandled type: %r %r" % (base, sub))
-
 
 
 def process_type(typ):

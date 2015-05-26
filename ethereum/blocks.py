@@ -397,6 +397,7 @@ class Block(rlp.Serializable):
         self.refunds = 0
 
         self.ether_delta = 0
+        self._get_transactions_cache = []
 
         # Journaling cache for state tree updates
         self.caches = {
@@ -407,10 +408,11 @@ class Block(rlp.Serializable):
             'all': {}
         }
         self.journal = []
+
         if self.number > 0:
-            self.ancestors = [self]
+            self.ancestor_hashes = [self.prevhash]
         else:
-            self.ancestors = [self] + [None] * 256
+            self.ancestor_hashes = [None] * 256
 
         # do some consistency checks on parent if given
         if parent:
@@ -552,7 +554,7 @@ class Block(rlp.Serializable):
                              nonce=nonce)
         block = Block(header, [], uncles, db=parent.db,
                       parent=parent, making=True)
-        block.ancestors += parent.ancestors
+        block.ancestor_hashes = [parent.hash] + parent.ancestor_hashes
         return block
 
     def check_fields(self):
@@ -626,7 +628,8 @@ class Block(rlp.Serializable):
                 return False
 
         # Check uncle validity
-        ancestor_chain = [a for a in self.get_ancestor_list(MAX_UNCLE_DEPTH + 1) if a]
+        ancestor_chain = [self] + [a for a in self.get_ancestor_list(MAX_UNCLE_DEPTH + 1) if a]
+        assert len(ancestor_chain) == min(self.header.number + 1, MAX_UNCLE_DEPTH + 2)
         ineligible = []
         # Uncles of this block cannot be direct ancestors and cannot also
         # be uncles included 1-6 blocks ago
@@ -652,26 +655,30 @@ class Block(rlp.Serializable):
     def get_ancestor_list(self, n):
         """Return `n` ancestors of this block.
 
-        The result will also be memoized in :attr:`ancestor_list`.
-
-        :returns: a list [self, p(self), p(p(self)), ..., p^n(self)]
+        :returns: a list [p(self), p(p(self)), ..., p^n(self)]
         """
-        if self.number == 0:
-            self.ancestors = [self] + [None] * 256
-        elif len(self.ancestors) <= n:
-            first_unknown = self.ancestors[-1].get_parent()
-            missing = first_unknown.get_ancestor_list(n - len(self.ancestors))
-            self.ancestors += missing
-        return self.ancestors[:n + 1]
+        if n == 0 or self.header.number == 0:
+            return []
+        p = self.get_parent()
+        return [p] + p.get_ancestor_list(n-1)
+
+    def get_ancestor_hash(self, n):
+        assert n > 0
+        while len(self.ancestor_hashes) < n:
+            if self.number == len(self.ancestor_hashes) - 1:
+                self.ancestor_hashes.append(None)
+            else:
+                self.ancestor_hashes.append(
+                    get_block(self.db,
+                              self.ancestor_hashes[-1]).get_parent().hash)
+        return self.ancestor_hashes[n-1]
 
     def get_ancestor(self, n):
-        """Get the `n`th ancestor of this block."""
-        return self.get_ancestor_list(n)[-1]
+        return self.get_block(self.get_ancestor_hash(n))
 
     def is_genesis(self):
         """`True` if this block is the genesis block, otherwise `False`."""
-        return all((self.prevhash == GENESIS_PREVHASH,
-                    self.nonce == GENESIS_NONCE))
+        return self.header.number == 0
 
     def _get_acct(self, address):
         """Get the account with the given address.
@@ -773,12 +780,11 @@ class Block(rlp.Serializable):
         else:
             return rlp.decode(tx, Transaction)
 
-    _get_transactions_cache = None
 
     def get_transactions(self):
         """Build a list of all transactions in this block."""
         num = self.transaction_count
-        if not self._get_transactions_cache or len(self._get_transactions_cache) != num:
+        if len(self._get_transactions_cache) != num:
             txs = []
             for i in range(num):
                 txs.append(self.get_transaction(i))
@@ -998,6 +1004,7 @@ class Block(rlp.Serializable):
             self.state.update(addr, rlp.encode(acct))
         log_state.trace('delta', changes=changes)
         self.reset_cache()
+        self.db.put(b'validated:' + self.hash, '1')
 
     def del_account(self, address):
         """Delete an account.
@@ -1111,7 +1118,7 @@ class Block(rlp.Serializable):
         self.gas_used = mysnapshot['gas']
         self.transactions = mysnapshot['txs']
         self.transaction_count = mysnapshot['txcount']
-        self._get_transactions_cache = None
+        self._get_transactions_cache = []
         self.ether_delta = mysnapshot['ether_delta']
 
     def finalize(self):
@@ -1306,7 +1313,7 @@ def get_block_header(db, blockhash):
     return bh
 
 
-@lru_cache(500)
+@lru_cache(32)
 def get_block(db, blockhash):
     """
     Assumption: blocks loaded from the db are not manipulated
@@ -1320,25 +1327,27 @@ def get_block(db, blockhash):
 #    return blockhash in db.DB(utils.get_db_path())
 
 
-def genesis(db, start_alloc=GENESIS_INITIAL_ALLOC, difficulty=GENESIS_DIFFICULTY):
+def genesis(db, start_alloc=GENESIS_INITIAL_ALLOC,
+            difficulty=GENESIS_DIFFICULTY,
+            **kwargs):
     """Build the genesis block."""
     # https://ethereum.etherpad.mozilla.org/11
     header = BlockHeader(
-        prevhash=GENESIS_PREVHASH,
+        prevhash=kwargs.get('prevhash', GENESIS_PREVHASH),
         uncles_hash=utils.sha3(rlp.encode([])),
-        coinbase=GENESIS_COINBASE,
+        coinbase=kwargs.get('coinbase', GENESIS_COINBASE),
         state_root=trie.BLANK_ROOT,
         tx_list_root=trie.BLANK_ROOT,
         receipts_root=trie.BLANK_ROOT,
         bloom=0,
-        difficulty=difficulty,
+        difficulty=kwargs.get('difficulty', GENESIS_DIFFICULTY),
         number=0,
-        gas_limit=GENESIS_GAS_LIMIT,
+        gas_limit=kwargs.get('gas_limit', GENESIS_GAS_LIMIT),
         gas_used=0,
-        timestamp=0,
-        extra_data='',
-        mixhash=GENESIS_MIXHASH,
-        nonce=GENESIS_NONCE,
+        timestamp=kwargs.get('timestamp', 0),
+        extra_data=kwargs.get('extra_data', ''),
+        mixhash=kwargs.get('mixhash', GENESIS_MIXHASH),
+        nonce=kwargs.get('nonce', GENESIS_NONCE),
     )
     block = Block(header, [], [], db=db)
     for addr, data in start_alloc.items():

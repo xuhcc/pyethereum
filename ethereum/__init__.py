@@ -23,6 +23,7 @@ from ethereum import transactions
 from ethereum import processblock
 from ethereum import tester
 from ethereum import abi
+from ethereum import keys
 from ethereum import ethash'''
 
 import native_contracts
