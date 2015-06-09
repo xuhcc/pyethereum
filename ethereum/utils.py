@@ -358,4 +358,4 @@ class bcolors:
 
 
 def DEBUG(*args, **kargs):
-    print bcolors.FAIL + repr(args) + repr(kargs) + bcolors.ENDC
+    print(bcolors.FAIL + repr(args) + repr(kargs) + bcolors.ENDC)
