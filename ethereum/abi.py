@@ -64,7 +64,7 @@ class ContractTranslator():
                     "encode_types": encode_types,
                     "decode_types": decode_types,
                     "is_unknown_type": is_unknown_type,
-                    "is_constant": sig_item.get('constant', False)
+                    "is_constant": sig_item.get('constant', False),
                     "signature": signature
                 }
             elif sig_item['type'] == 'event':

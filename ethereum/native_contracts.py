@@ -41,8 +41,9 @@ import inspect
 import abi
 from ethereum.utils import encode_int, zpad, big_endian_to_int, int_to_big_endian
 import traceback
-from slogging import get_logger
-log = get_logger('nativecontracts')
+from ethereum import slogging
+slogging.configure(config_string=':debug')
+log = slogging.get_logger('nc')
 
 
 class Registry(object):
@@ -100,7 +101,7 @@ class Registry(object):
         return self.is_instance_address(address) and nca in self.native_contracts
 
     def __getitem__(self, address):
-        print 'returning native contract', self.address_to_native_contract_class(address)
+        # print 'returning native contract', self.address_to_native_contract_class(address)
         return self.address_to_native_contract_class(address)
 
 # set registry
@@ -155,6 +156,7 @@ class CreateNativeContractInstance(NativeContractBase):
     address = utils.int_to_addr(1024)
 
     def _safe_call(self):
+        log.debug('create native contract instance called')
         assert len(self._msg.sender) == 20
         assert len(self._msg.data.extract_all()) >= 4
 
@@ -181,6 +183,8 @@ class CreateNativeContractInstance(NativeContractBase):
         self._msg.data = vm.CallData(self._msg.data.data[4:], 0, 0)
         res, gas, dat = registry[self._msg.to](self._ext, self._msg)
         assert gas >= 0
+        log.debug('created native contract instance', template=nc_address.encode('hex'), 
+            instance=self._msg.to.encode('hex'))
         return res, gas, memoryview(self._msg.to).tolist()
 
 
@@ -418,7 +422,7 @@ class NativeABIContract(NativeContractBase):
         try:
             res = method(self, *args)
         except RuntimeError as e:
-            log.warn("error in method", method=method, error=e)
+            log.warn("error in method", method=method.__name__, error=e)
             return 0, self.gas, []
         log.debug('call returned', result=res)
         return 1, self.gas, memoryview(abi_encode_return_vals(method, res)).tolist()
