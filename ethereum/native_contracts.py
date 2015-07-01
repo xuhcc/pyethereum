@@ -183,8 +183,8 @@ class CreateNativeContractInstance(NativeContractBase):
         self._msg.data = vm.CallData(self._msg.data.data[4:], 0, 0)
         res, gas, dat = registry[self._msg.to](self._ext, self._msg)
         assert gas >= 0
-        log.debug('created native contract instance', template=nc_address.encode('hex'), 
-            instance=self._msg.to.encode('hex'))
+        log.debug('created native contract instance', template=nc_address.encode('hex'),
+                  instance=self._msg.to.encode('hex'))
         return res, gas, memoryview(self._msg.to).tolist()
 
 
@@ -254,6 +254,7 @@ def constant(f):
     """
     f.is_constant = True
     return f
+
 
 class NativeABIContract(NativeContractBase):
 
@@ -330,18 +331,20 @@ class NativeABIContract(NativeContractBase):
         self._ext.set_balance(self.address, 0)
         self._ext.add_suicide(self.address)
 
-    def call_abi(self, to, abi_contract_method, *args, **kargs):
+    def call(self, to, data='', **kargs):
         assert set(kargs.keys()).issubset(set(('value',)))
         value = kargs.get('value', 0)
-        data = abi_encode_args(abi_contract_method, args)
         data = vm.CallData(memoryview(data).tolist())
         msg = vm.Message(self.address, to, value, self.gas, data,
                          self.msg_depth + 1, code_address=to)
         success, self.gas, out = self._ext.msg(msg)
         assert success  # FIXME
-        out = ''.join(chr(x) for x in out)
-        return abi_decode_return_vals(abi_contract_method, out)
+        return ''.join(chr(x) for x in out)
 
+    def call_abi(self, to, abi_contract_method, *args, **kargs):
+        data = abi_encode_args(abi_contract_method, args)
+        out = self.call(to, data=data, **kargs)
+        return abi_decode_return_vals(abi_contract_method, out)
 
     @classmethod
     def _get_method_abi(cls, method):
@@ -364,7 +367,8 @@ class NativeABIContract(NativeContractBase):
         # add methods
         for m in cls._abi_methods():
             m_abi = cls._get_method_abi(m)
-            d = dict(constant=getattr(m,'is_constant',False), name=m.__name__, type='function', inputs=[], outputs=[])
+            d = dict(constant=getattr(m, 'is_constant', False),
+                     name=m.__name__, type='function', inputs=[], outputs=[])
             for name, typ in zip(m_abi['arg_names'], m_abi['arg_types']):
                 d['inputs'].append(dict(name=name, type=typ))
             return_types = m_abi['return_types']
@@ -380,7 +384,6 @@ class NativeABIContract(NativeContractBase):
         return contract_abi
 
     abi = json_abi
-
 
     @classmethod
     def _abi_methods(cls):
