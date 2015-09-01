@@ -4,9 +4,10 @@ import os
 import rlp
 from ethereum import utils
 from ethereum.utils import to_string
-from ethereum.abi import is_string
+from ethereum.utils import is_string
 import copy
 from rlp.utils import decode_hex, encode_hex, ascii_chr, str_to_bytes
+import sys
 
 bin_to_nibbles_cache = {}
 
@@ -47,6 +48,7 @@ NIBBLE_TERMINATOR = 16
 RECORDING = 1
 NONE = 0
 VERIFYING = -1
+ZERO_ENCODED = utils.encode_int(0)
 
 proving = False
 
@@ -185,6 +187,7 @@ def is_key_value_type(node_type):
 
 BLANK_NODE = b''
 BLANK_ROOT = utils.sha3rlp(b'')
+DEATH_ROW_OFFSET = 2**62
 
 
 def transient_trie_exception(*args):
@@ -204,6 +207,9 @@ class Trie(object):
         if self.transient:
             self.update = self.get = self.delete = transient_trie_exception
         self.set_root_hash(root_hash)
+        self.death_row_timeout = 5000
+        self.nodes_for_death_row = []
+        self.journal = []
 
     # def __init__(self, dbfile, root_hash=BLANK_ROOT):
     #     '''it also present a dictionary like interface
@@ -254,9 +260,15 @@ class Trie(object):
         assert isinstance(self.root_node, list)
         val = rlp.encode(self.root_node)
         key = utils.sha3(val)
-        self.db.put(key, val)
         self.spv_grabbing(self.root_node)
         return key
+
+    def replace_root_hash(self, old_node, new_node):
+        # sys.stderr.write('rrh %r %r\n' % (old_node, new_node))
+        self._delete_node_storage(old_node, is_root=True)
+        self._encode_node(new_node, is_root=True)
+        self.root_node = new_node
+        # sys.stderr.write('nrh: %s\n' % self.root_hash.encode('hex'))
 
     @root_hash.setter
     def root_hash(self, value):
@@ -271,7 +283,29 @@ class Trie(object):
         if root_hash == BLANK_ROOT:
             self.root_node = BLANK_NODE
             return
+        # print repr(root_hash)
         self.root_node = self._decode_to_node(root_hash)
+        # dummy to increase reference count
+        # self._encode_node(self.root_node)
+
+    def all_nodes(self, node=None):
+        proof.push(RECORDING)
+        self.get_root_hash()
+        self.to_dict()
+        o = proof.get_nodelist()
+        proof.pop()
+        return list(o)
+        # if node is None:
+        #     node = self.root_node
+        # node_type = self._get_node_type(node)
+        # o = 1 if len(rlp.encode(node)) >= 32 else 0
+        # if node_type == NODE_TYPE_BRANCH:
+        #     for item in node[:16]:
+        #         o += self.total_node_count(self._decode_to_node(item))
+        # elif is_key_value_type(node_type):
+        #     if node_type == NODE_TYPE_EXTENSION:
+        #         o += self.total_node_count(self._decode_to_node(node[1]))
+        # return o
 
     def clear(self):
         ''' clear all tree data
@@ -290,17 +324,16 @@ class Trie(object):
             if node_type == NODE_TYPE_EXTENSION:
                 self._delete_child_storage(self._decode_to_node(node[1]))
 
-    def _encode_node(self, node):
+    def _encode_node(self, node, is_root=False):
         if node == BLANK_NODE:
             return BLANK_NODE
-        assert isinstance(node, list)
+        # assert isinstance(node, list)
         rlpnode = rlp.encode(node)
-        if len(rlpnode) < 32:
+        if len(rlpnode) < 32 and not is_root:
             return node
 
         hashkey = utils.sha3(rlpnode)
-        self.db.put(hashkey, rlpnode)
-        self.spv_storing(node)
+        self.db.inc_refcount(hashkey, rlpnode)
         return hashkey
 
     def _decode_to_node(self, encoded):
@@ -363,6 +396,7 @@ class Trie(object):
                 return BLANK_NODE
 
     def _update(self, node, key, value):
+        # sys.stderr.write('u\n')
         """ update item inside a node
 
         :param node: node in form of list, or BLANK_NODE
@@ -378,7 +412,9 @@ class Trie(object):
         node_type = self._get_node_type(node)
 
         if node_type == NODE_TYPE_BLANK:
-            return [pack_nibbles(with_terminator(key)), value]
+            o = [pack_nibbles(with_terminator(key)), value]
+            self._encode_node(o)
+            return o
 
         elif node_type == NODE_TYPE_BRANCH:
             if not key:
@@ -388,22 +424,27 @@ class Trie(object):
                     self._decode_to_node(node[key[0]]),
                     key[1:], value)
                 node[key[0]] = self._encode_node(new_node)
+                self._delete_node_storage(new_node)
+            self._encode_node(node)
             return node
 
         elif is_key_value_type(node_type):
             return self._update_kv_node(node, key, value)
 
     def _update_and_delete_storage(self, node, key, value):
-        old_node = node[:]
+        # sys.stderr.write('uds_start %r\n' % node)
+        old_node = copy.deepcopy(node)
         new_node = self._update(node, key, value)
-        if old_node != new_node:
-            self._delete_node_storage(old_node)
+        # sys.stderr.write('uds_mid %r\n' % old_node)
+        self._delete_node_storage(old_node)
+        # sys.stderr.write('uds_end %r\n' % old_node)
         return new_node
 
     def _update_kv_node(self, node, key, value):
         node_type = self._get_node_type(node)
         curr_key = without_terminator(unpack_to_nibbles(node[0]))
         is_inner = node_type == NODE_TYPE_EXTENSION
+        # sys.stderr.write('ukv %r %r\n' % (key, value))
 
         # find longest common prefix
         prefix_length = 0
@@ -412,20 +453,31 @@ class Trie(object):
                 break
             prefix_length = i + 1
 
+        # sys.stderr.write('pl: %d\n' % prefix_length)
+
         remain_key = key[prefix_length:]
         remain_curr_key = curr_key[prefix_length:]
+        new_node_encoded = False
 
         if remain_key == [] == remain_curr_key:
+            # sys.stderr.write('1111\n')
             if not is_inner:
-                return [node[0], value]
+                o = [node[0], value]
+                self._encode_node(o)
+                return o
             new_node = self._update_and_delete_storage(
                 self._decode_to_node(node[1]), remain_key, value)
+            new_node_encoded = True
 
         elif remain_curr_key == []:
             if is_inner:
+                # sys.stderr.write('22221\n')
                 new_node = self._update_and_delete_storage(
                     self._decode_to_node(node[1]), remain_key, value)
+                new_node_encoded = True
+                # sys.stderr.write('22221e\n')
             else:
+                # sys.stderr.write('22222\n')
                 new_node = [BLANK_NODE] * 17
                 new_node[-1] = node[1]
                 new_node[remain_key[0]] = self._encode_node([
@@ -433,6 +485,7 @@ class Trie(object):
                     value
                 ])
         else:
+            # sys.stderr.write('3333\n')
             new_node = [BLANK_NODE] * 17
             if len(remain_curr_key) == 1 and is_inner:
                 new_node[remain_curr_key[0]] = node[1]
@@ -452,10 +505,18 @@ class Trie(object):
                 ])
 
         if prefix_length:
+            # sys.stderr.write('444441: %d\n' % prefix_length)
             # create node for key prefix
-            return [pack_nibbles(curr_key[:prefix_length]),
-                    self._encode_node(new_node)]
+            o = [pack_nibbles(curr_key[:prefix_length]),
+                 self._encode_node(new_node)]
+            if new_node_encoded:
+                self._delete_node_storage(new_node)
+            self._encode_node(o)
+            return o
         else:
+            # sys.stderr.write('444442: %d\n' % prefix_length)
+            if not new_node_encoded:
+                self._encode_node(new_node)
             return new_node
 
     def _getany(self, node, reverse=False, path=[]):
@@ -538,22 +599,23 @@ class Trie(object):
         o = self._iter(self.root_node, key, reverse=True)
         return nibbles_to_bin(o) if o else None
 
-    def _delete_node_storage(self, node):
+    def _delete_node_storage(self, node, is_root=False):
         '''delete storage
         :param node: node in form of list, or BLANK_NODE
         '''
         if node == BLANK_NODE:
             return
-        assert isinstance(node, list)
-        encoded = self._encode_node(node)
-        if len(encoded) < 32:
+        # assert isinstance(node, list)
+        encoded = rlp.encode(node)
+        if len(encoded) < 32 and not is_root:
             return
         """
         ===== FIXME ====
         in the current trie implementation two nodes can share identical subtrees
         thus we can not safely delete nodes for now
         """
-        # self.db.delete(encoded) # FIXME
+        hashkey = utils.sha3(encoded)
+        self.db.dec_refcount(hashkey)
 
     def _delete(self, node, key):
         """ update item inside a node
@@ -567,6 +629,7 @@ class Trie(object):
         responsibility to *store* the new node storage, and delete the old
         node storage
         """
+        # sys.stderr.write('del\n')
         node_type = self._get_node_type(node)
         if node_type == NODE_TYPE_BLANK:
             return BLANK_NODE
@@ -578,12 +641,14 @@ class Trie(object):
             return self._delete_kv_node(node, key)
 
     def _normalize_branch_node(self, node):
+        # sys.stderr.write('nbn\n')
         '''node should have only one item changed
         '''
         not_blank_items_count = sum(1 for x in range(17) if node[x])
         assert not_blank_items_count >= 1
 
         if not_blank_items_count > 1:
+            self._encode_node(node)
             return node
 
         # now only one item is not blank
@@ -591,7 +656,9 @@ class Trie(object):
 
         # the value item is not blank
         if not_blank_index == 16:
-            return [pack_nibbles(with_terminator([])), node[16]]
+            o = [pack_nibbles(with_terminator([])), node[16]]
+            self._encode_node(o)
+            return o
 
         # normal item is not blank
         sub_node = self._decode_to_node(node[not_blank_index])
@@ -600,59 +667,77 @@ class Trie(object):
         if is_key_value_type(sub_node_type):
             # collape subnode to this node, not this node will have same
             # terminator with the new sub node, and value does not change
+            self._delete_node_storage(sub_node)
             new_key = [not_blank_index] + \
                 unpack_to_nibbles(sub_node[0])
-            return [pack_nibbles(new_key), sub_node[1]]
+            o = [pack_nibbles(new_key), sub_node[1]]
+            self._encode_node(o)
+            return o
         if sub_node_type == NODE_TYPE_BRANCH:
-            return [pack_nibbles([not_blank_index]),
-                    self._encode_node(sub_node)]
+            o = [pack_nibbles([not_blank_index]),
+                 node[not_blank_index]]
+            self._encode_node(o)
+            return o
         assert False
 
     def _delete_and_delete_storage(self, node, key):
-        old_node = node[:]
+        # sys.stderr.write('dds_start %r\n' % node)
+        old_node = copy.deepcopy(node)
         new_node = self._delete(node, key)
-        if old_node != new_node:
-            self._delete_node_storage(old_node)
+        # sys.stderr.write('dds_mid %r\n' % old_node)
+        self._delete_node_storage(old_node)
+        # sys.stderr.write('dds_end %r %r\n' % (old_node, new_node))
         return new_node
 
     def _delete_branch_node(self, node, key):
+        # sys.stderr.write('dbn\n')
         # already reach the expected node
         if not key:
             node[-1] = BLANK_NODE
             return self._normalize_branch_node(node)
 
-        encoded_new_sub_node = self._encode_node(
-            self._delete_and_delete_storage(
-                self._decode_to_node(node[key[0]]), key[1:])
-        )
+        o = self._delete_and_delete_storage(
+            self._decode_to_node(node[key[0]]), key[1:])
 
-        if encoded_new_sub_node == node[key[0]]:
-            return node
+        encoded_new_sub_node = self._encode_node(o)
+        self._delete_node_storage(o)
+        # sys.stderr.write('dbn2\n')
+
+        # if encoded_new_sub_nod == node[key[0]]:
+        #     return node
 
         node[key[0]] = encoded_new_sub_node
         if encoded_new_sub_node == BLANK_NODE:
             return self._normalize_branch_node(node)
+        self._encode_node(node)
 
         return node
 
     def _delete_kv_node(self, node, key):
+        # sys.stderr.write('dkv\n')
         node_type = self._get_node_type(node)
         assert is_key_value_type(node_type)
         curr_key = without_terminator(unpack_to_nibbles(node[0]))
 
         if not starts_with(key, curr_key):
             # key not found
+            self._encode_node(node)
             return node
 
         if node_type == NODE_TYPE_LEAF:
-            return BLANK_NODE if key == curr_key else node
+            if key == curr_key:
+                return BLANK_NODE
+            else:
+                self._encode_node(node)
+                return node
 
         # for inner key value type
         new_sub_node = self._delete_and_delete_storage(
             self._decode_to_node(node[1]), key[len(curr_key):])
+        # sys.stderr.write('nsn: %r %r\n' % (node, new_sub_node))
 
-        if self._encode_node(new_sub_node) == node[1]:
-            return node
+        # if self._encode_node(new_sub_node) == node[1]:
+        #     return node
 
         # new sub node is BLANK_NODE
         if new_sub_node == BLANK_NODE:
@@ -664,13 +749,21 @@ class Trie(object):
         new_sub_node_type = self._get_node_type(new_sub_node)
 
         if is_key_value_type(new_sub_node_type):
+            # sys.stderr.write('nsn1\n')
             # collape subnode to this node, not this node will have same
             # terminator with the new sub node, and value does not change
             new_key = curr_key + unpack_to_nibbles(new_sub_node[0])
-            return [pack_nibbles(new_key), new_sub_node[1]]
+            o = [pack_nibbles(new_key), new_sub_node[1]]
+            self._delete_node_storage(new_sub_node)
+            self._encode_node(o)
+            return o
 
         if new_sub_node_type == NODE_TYPE_BRANCH:
-            return [pack_nibbles(curr_key), self._encode_node(new_sub_node)]
+            # sys.stderr.write('nsn2\n')
+            o = [pack_nibbles(curr_key), self._encode_node(new_sub_node)]
+            self._delete_node_storage(new_sub_node)
+            self._encode_node(o)
+            return o
 
         # should be no more cases
         assert False
@@ -685,10 +778,31 @@ class Trie(object):
         if len(key) > 32:
             raise Exception("Max key length is 32")
 
+        old_root = copy.deepcopy(self.root_node)
         self.root_node = self._delete_and_delete_storage(
             self.root_node,
             bin_to_nibbles(to_string(key)))
-        self.get_root_hash()
+        self.replace_root_hash(old_root, self.root_node)
+
+    def clear_all(self, node=None):
+        if node is None:
+            node = self.root_node
+            self._delete_node_storage(node)
+        if node == BLANK_NODE:
+            return
+
+        node_type = self._get_node_type(node)
+
+        self._delete_node_storage(node)
+
+        if is_key_value_type(node_type):
+            value_is_node = node_type == NODE_TYPE_EXTENSION
+            if value_is_node:
+                self.clear_all(self._decode_to_node(node[1]))
+
+        elif node_type == NODE_TYPE_BRANCH:
+            for i in range(16):
+                self.clear_all(self._decode_to_node(node[i]))
 
     def _get_size(self, node):
         '''Get counts of (key, value) stored in this and the descendant nodes
@@ -711,49 +825,6 @@ class Trie(object):
                      for x in range(16)]
             sizes = sizes + [1 if node[-1] else 0]
             return sum(sizes)
-
-    def _iter_branch(self, node):
-        '''yield (key, value) stored in this and the descendant nodes
-        :param node: node in form of list, or BLANK_NODE
-
-        .. note::
-            Here key is in full form, rather than key of the individual node
-        '''
-        if node == BLANK_NODE:
-            raise StopIteration
-
-        node_type = self._get_node_type(node)
-
-        if is_key_value_type(node_type):
-            nibbles = without_terminator(unpack_to_nibbles(node[0]))
-            key = b'+'.join([to_string(x) for x in nibbles])
-            if node_type == NODE_TYPE_EXTENSION:
-                sub_tree = self._iter_branch(self._decode_to_node(node[1]))
-            else:
-                sub_tree = [(to_string(NIBBLE_TERMINATOR), node[1])]
-
-            # prepend key of this node to the keys of children
-            for sub_key, sub_value in sub_tree:
-                full_key = (key + b'+' + sub_key).strip(b'+')
-                yield (full_key, sub_value)
-
-        elif node_type == NODE_TYPE_BRANCH:
-            for i in range(16):
-                sub_tree = self._iter_branch(self._decode_to_node(node[i]))
-                for sub_key, sub_value in sub_tree:
-                    full_key = (str_to_bytes(str(i)) + b'+' + sub_key).strip(b'+')
-                    yield (full_key, sub_value)
-            if node[16]:
-                yield (to_string(NIBBLE_TERMINATOR), node[-1])
-
-    def iter_branch(self):
-        for key_str, value in self._iter_branch(self.root_node):
-            if key_str:
-                nibbles = [int(x) for x in key_str.split(b'+')]
-            else:
-                nibbles = []
-            key = nibbles_to_bin(without_terminator(nibbles))
-            yield key, value
 
     def _to_dict(self, node):
         '''convert (key, value) stored in this and the descendant nodes
@@ -847,11 +918,12 @@ class Trie(object):
 
         # if value == '':
         #     return self.delete(key)
+        old_root = copy.deepcopy(self.root_node)
         self.root_node = self._update_and_delete_storage(
             self.root_node,
             bin_to_nibbles(to_string(key)),
             value)
-        self.get_root_hash()
+        self.replace_root_hash(old_root, self.root_node)
 
     def root_hash_valid(self):
         if self.root_hash == BLANK_ROOT:
@@ -886,7 +958,6 @@ def verify_spv_proof(root, key, proof):
 
 
 if __name__ == "__main__":
-    import sys
     from . import db
 
     _db = db.DB(sys.argv[2])

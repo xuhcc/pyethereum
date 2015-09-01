@@ -42,6 +42,8 @@ class ContractTranslator():
         if is_string(full_signature):
             full_signature = json_decode(full_signature)
         for sig_item in full_signature:
+            if sig_item['type'] == 'constructor':
+                continue
             encode_types = [f['type'] for f in sig_item['inputs']]
             signature = [(f['type'], f['name']) for f in sig_item['inputs']]
             name = sig_item['name']
@@ -85,7 +87,7 @@ class ContractTranslator():
         return o
 
     def decode(self, name, data):
-        # print 'out', data.encode('hex')
+        # print 'out', utils.encode_hex(data)
         fdata = self.function_data[name]
         if fdata['is_unknown_type']:
             o = [utils.to_signed(utils.big_endian_to_int(data[i:i + 32]))
@@ -104,20 +106,24 @@ class ContractTranslator():
         name = self.event_data[log.topics[0]]['name']
         names = self.event_data[log.topics[0]]['names']
         indexed = self.event_data[log.topics[0]]['indexed']
+        indexed_types = [types[i] for i in range(len(types))
+                         if indexed[i]]
         unindexed_types = [types[i] for i in range(len(types))
                            if not indexed[i]]
-        # print('listen', log.data.encode('hex'))
+        # print('listen', log.data.encode('hex'), log.topics)
         deserialized_args = decode_abi(unindexed_types, log.data)
         o = {}
         c1, c2 = 0, 0
         for i in range(len(names)):
             if indexed[i]:
-                o[names[i]] = log.topics[c1 + 1]
+                topic_bytes = utils.zpad(utils.encode_int(log.topics[c1 + 1]), 32)
+                o[names[i]] = decode_single(process_type(indexed_types[c1]),
+                                            topic_bytes)
                 c1 += 1
             else:
                 o[names[i]] = deserialized_args[c2]
                 c2 += 1
-        o["_event_type"] = name
+        o["_event_type"] = utils.to_string(name)
         if not noprint:
             print(o)
         return o
@@ -140,6 +146,8 @@ class ValueOutOfBounds(EncodingError):
 
 # Decode an integer
 def decint(n):
+    if isinstance(n, str):
+        n = utils.to_string(n)
     if is_numeric(n) and n < 2**256 and n > -2**255:
         return n
     elif is_numeric(n):
@@ -198,14 +206,14 @@ def encode_single(typ, arg):
             raise EncodingError("Expecting string: %r" % arg)
         # Fixed length: string<sz>
         if len(sub):
-            if not (int(sub) <= 32 and len(arg) <= int(sub)):
-                raise EncodingError("too long: %r" % arg)
-            return arg + '\x00' * (32 - len(arg))
+            assert int(sub) <= 32
+            assert len(arg) <= int(sub)
+            return arg + b'\x00' * (32 - len(arg))
         # Variable length: string
         else:
             return zpad(encode_int(len(arg)), 32) + \
                 arg + \
-                '\x00' * (utils.ceil32(len(arg)) - len(arg))
+                b'\x00' * (utils.ceil32(len(arg)) - len(arg))
     # Hashes: hash<sz>
     elif base == 'hash':
         if not (int(sub) and int(sub) <= 32):
@@ -236,7 +244,7 @@ def process_type(typ):
     # Crazy reg expression to separate out base type component (eg. uint),
     # size (eg. 256, 128x128, none), array component (eg. [], [45], none)
     regexp = '([a-z]*)([0-9]*x?[0-9]*)((\[[0-9]*\])*)'
-    base, sub, arr, _ = re.match(regexp, typ).groups()
+    base, sub, arr, _ = re.match(regexp, utils.to_string_for_regexp(typ)).groups()
     arrlist = re.findall('\[[0-9]*\]', arr)
     assert len(''.join(arrlist)) == len(arr), \
         "Unknown characters found in array declaration"
@@ -289,7 +297,7 @@ def get_size(typ):
     o = get_size((base, sub, arrlist[:-1]))
     if o is None:
         return None
-    return arrlist[-1] * o
+    return arrlist[-1][0] * o
 
 
 lentyp = 'uint', 256, []
@@ -301,11 +309,11 @@ def enc(typ, arg):
     sz = get_size(typ)
     # Encode dynamic-sized strings as <len(str)> + <str>
     if base in ('string', 'bytes') and not sub:
-        assert isinstance(arg, (str, bytes)), \
+        assert isinstance(arg, (str, bytes, utils.unicode)), \
             "Expecting a string"
         return enc(lentyp, len(arg)) + \
-            arg + \
-            '\x00' * (utils.ceil32(len(arg)) - len(arg))
+            utils.to_string(arg) + \
+            b'\x00' * (utils.ceil32(len(arg)) - len(arg))
     # Encode dynamic-sized lists via the head/tail mechanism described in
     # https://github.com/ethereum/wiki/wiki/Proposal-for-new-ABI-value-encoding
     elif sz is None:
@@ -313,7 +321,7 @@ def enc(typ, arg):
             "Expecting a list argument"
         subtyp = base, sub, arrlist[:-1]
         subsize = get_size(subtyp)
-        myhead, mytail = '', ''
+        myhead, mytail = b'', b''
         if arrlist[-1] == []:
             myhead += enc(lentyp, len(arg))
         else:
@@ -330,10 +338,10 @@ def enc(typ, arg):
     # Encode static-sized lists via sequential packing
     else:
         if arrlist == []:
-            return encode_single(typ, arg)
+            return utils.to_string(encode_single(typ, arg))
         else:
             subtyp = base, sub, arrlist[:-1]
-            o = ''
+            o = b''
             for x in arg:
                 o += enc(subtyp, x)
             return o
@@ -349,7 +357,7 @@ def encode_abi(types, args):
             headsize += 32
         else:
             headsize += sizes[i]
-    myhead, mytail = '', ''
+    myhead, mytail = b'', b''
     for i, arg in enumerate(args):
         if sizes[i] is None:
             myhead += enc(lentyp, headsize + len(mytail))
@@ -455,7 +463,7 @@ def dec(typ, arg):
                     for i in range(L)]
     # Static-sized arrays: decode piece-by-piece
     elif len(arrlist):
-        L = arrlist[-1]
+        L = arrlist[-1][0]
         subtyp = base, sub, arrlist[:-1]
         subsize = get_size(subtyp)
         return [dec(subtyp, arg[subsize * i:subsize * (i + 1)])

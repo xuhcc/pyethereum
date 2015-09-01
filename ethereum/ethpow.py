@@ -8,19 +8,23 @@ from ethereum.slogging import get_logger
 log = get_logger('eth.pow')
 
 if sys.version_info.major == 2:
-    ETHASH_LIB = 'pyethash'
     from repoze.lru import lru_cache
 else:
-    ETHASH_LIB = 'ethash'
     from functools import lru_cache
 
+try:
+    import pyethash
+    ETHASH_LIB = 'pyethash'  # the C++ based implementation
+    log.warn('using C++ implementation')
+except ImportError:
+    ETHASH_LIB = 'ethash'
+    log.warn('using pure python implementation')
 
 if ETHASH_LIB == 'ethash':
     mkcache = ethash.mkcache
     EPOCH_LENGTH = ethash_utils.EPOCH_LENGTH
     hashimoto_light = ethash.hashimoto_light
 elif ETHASH_LIB == 'pyethash':
-    import pyethash
     mkcache = pyethash.mkcache_bytes
     EPOCH_LENGTH = pyethash.EPOCH_LENGTH
     hashimoto_light = lambda s, c, h, n: \
@@ -58,9 +62,8 @@ def check_pow(block_number, header_hash, mixhash, nonce, difficulty):
     :returns: `True` or `False`
     """
     log.debug('checking pow', block_number=block_number)
-    assert len(mixhash) == 32
-    assert len(header_hash) == 32
-    assert len(nonce) == 8
+    if len(mixhash) != 32 or len(header_hash) != 32 or len(nonce) != 8:
+        return False
 
     # Grab current cache
     cache = get_cache(block_number)

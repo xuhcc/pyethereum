@@ -25,6 +25,11 @@ class SecureTrie(object):
             o[k] = v
         return o
 
+    def iter_branch(self):
+        for h, v in self.trie.iter_branch():
+            k = self.db.get(h)
+            yield (k, v)
+
     def root_hash_valid(self):
         return self.trie.root_hash_valid()
 
@@ -35,3 +40,12 @@ class SecureTrie(object):
     @root_hash.setter
     def root_hash(self, value):
         self.trie.root_hash = value
+
+    def process_epoch(self, epoch):
+        self.trie.process_epoch(epoch)
+
+    def commit_death_row(self, epoch):
+        self.trie.commit_death_row(epoch)
+
+    def revert_epoch(self, epoch):
+        self.trie.revert_epoch(epoch)

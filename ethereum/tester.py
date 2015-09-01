@@ -131,7 +131,7 @@ class state():
             o[accounts[i]] = {"wei": 10 ** 24}
         for i in range(1, 5):
             o[u.int_to_addr(i)] = {"wei": 1}
-        self.block = b.genesis(self.db, o)
+        self.block = b.genesis(self.db, start_alloc=o)
         self.blocks = [self.block]
         self.block.timestamp = 1410973349
         self.block.coinbase = a0
@@ -168,7 +168,7 @@ class state():
 
     def evm(self, evm, sender=k0, endowment=0, gas=None):
         sendnonce = self.block.get_nonce(u.privtoaddr(sender))
-        tx = t.contract(sendnonce, 1, gas_limit, endowment, evm)
+        tx = t.contract(sendnonce, gas_price, gas_limit, endowment, evm)
         tx.sign(sender)
         if gas is not None:
             tx.startgas = gas
@@ -191,7 +191,7 @@ class state():
                             " the abi_contract mechanism")
         tm, g = time.time(), self.block.gas_used
         sendnonce = self.block.get_nonce(u.privtoaddr(sender))
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         recorder = LogRecorder() if profiling > 1 else None
@@ -229,7 +229,7 @@ class state():
             evmdata = serpent.encode_abi(funid, *abi)
         else:
             evmdata = serpent.encode_datalist(*data)
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         return spv.mk_transaction_spv_proof(self.block, tx)
@@ -241,7 +241,7 @@ class state():
             evmdata = serpent.encode_abi(funid, *abi)
         else:
             evmdata = serpent.encode_datalist(*data)
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         return spv.verify_transaction_spv_proof(self.block, tx, proof)
@@ -307,3 +307,4 @@ def disable_logging():
 
 
 gas_limit = 1000000
+gas_price = 1

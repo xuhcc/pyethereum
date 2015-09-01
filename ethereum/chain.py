@@ -1,12 +1,16 @@
 import os
 import time
 from ethereum import utils
+from ethereum import pruning_trie as trie
+from ethereum.refcount_db import RefcountDB
+import ethereum.db as db
 from ethereum.utils import to_string, is_string
 import rlp
 from rlp.utils import encode_hex
 from ethereum import blocks
 from ethereum import processblock
 from ethereum.slogging import get_logger
+import sys
 log = get_logger('eth.chain')
 
 
@@ -40,7 +44,11 @@ class Index(object):
     def update_blocknumbers(self, blk):
         "start from head and update until the existing indices match the block"
         while True:
-            self.db.put(self._block_by_number_key(blk.number), blk.hash)
+            if blk.number > 0:
+                self.db.put_temporarily(self._block_by_number_key(blk.number), blk.hash)
+            else:
+                self.db.put(self._block_by_number_key(blk.number), blk.hash)
+            self.db.commit_refcount_changes(blk.number)
             if blk.number == 0:
                 break
             blk = blk.get_parent()
@@ -59,7 +67,8 @@ class Index(object):
     def _add_transactions(self, blk):
         "'tx_hash' -> 'rlp([blockhash,tx_number])"
         for i, tx in enumerate(blk.get_transactions()):
-            self.db.put(tx.hash, rlp.encode([blk.hash, i]))
+            self.db.put_temporarily(tx.hash, rlp.encode([blk.hash, i]))
+        self.db.commit_refcount_changes(blk.number)
 
     def get_transaction(self, txhash):
         "return (tx, block, index)"
@@ -78,7 +87,7 @@ class Index(object):
         # only efficient for few children per block
         children = list(set(self.get_children(parent_hash) + [child_hash]))
         assert children.count(child_hash) == 1
-        self.db.put(self._child_db_key(parent_hash), rlp.encode(children))
+        self.db.put_temporarily(self._child_db_key(parent_hash), rlp.encode(children))
 
     def get_children(self, blk_hash):
         "returns block hashes"
@@ -148,7 +157,36 @@ class Chain(object):
             if block.get_parent() != self.head:
                 log.debug('New Head is on a different branch',
                           head_hash=block, old_head_hash=self.head)
+        # Some temporary auditing to make sure pruning is working well
+        if block.number > 0 and block.number % 500 == 0 and isinstance(db, RefcountDB):
+            trie.proof.push(trie.RECORDING)
+            block.to_dict(with_state=True)
+            n = trie.proof.get_nodelist()
+            trie.proof.pop()
+            sys.stderr.write('State size: %d\n' % sum([(len(rlp.encode(a)) + 32) for a in n]))
+        # Fork detected, revert death row and change logs
+        if block.number > 0:
+            b = block.get_parent()
+            h = self.head
+            b_children = []
+            if b.hash != h.hash:
+                log.warn('reverting')
+                while h.number > b.number:
+                    h.state.db.revert_refcount_changes(h.number)
+                    h = h.get_parent()
+                while b.number > h.number:
+                    b_children.append(b)
+                    b = b.get_parent()
+                while b.hash != h.hash:
+                    h.state.db.revert_refcount_changes(h.number)
+                    h = h.get_parent()
+                    b_children.append(b)
+                    b = b.get_parent()
+                for bc in b_children:
+                    processblock.verify(bc, bc.get_parent())
         self.blockchain.put('HEAD', block.hash)
+        assert self.blockchain.get('HEAD') == block.hash
+        sys.stderr.write('New head: %s %d\n' % (utils.encode_hex(block.hash), block.number))
         self.index.update_blocknumbers(self.head)
         self._update_head_candidate(forward_pending_transactions)
         if self.new_head_cb and not block.is_genesis():
@@ -171,8 +209,9 @@ class Chain(object):
 
         # create block
         ts = max(int(time.time()), self.head.timestamp + 1)
+        d = db.OverlayDB(self.head.db)
         head_candidate = blocks.Block.init_from_parent(self.head, coinbase=self._coinbase,
-                                                       timestamp=ts, uncles=uncles)
+                                                       timestamp=ts, uncles=uncles, db=d)
         assert head_candidate.validate_uncles()
 
         self.pre_finalize_state_root = head_candidate.state_root
@@ -222,7 +261,10 @@ class Chain(object):
         return self.has_block(blockhash)
 
     def _store_block(self, block):
-        self.blockchain.put(block.hash, rlp.encode(block))
+        if block.number > 0:
+            self.blockchain.put_temporarily(block.hash, rlp.encode(block))
+        else:
+            self.blockchain.put(block.hash, rlp.encode(block))
 
     def commit(self):
         self.blockchain.commit()
@@ -271,6 +313,10 @@ class Chain(object):
             _log.warn('has higher blk number than head but lower chain_difficulty',
                       head_hash=self.head, block_difficulty=block.chain_difficulty(),
                       head_difficulty=self.head.chain_difficulty())
+        block.transactions.clear_all()
+        block.receipts.clear_all()
+        block.state.db.commit_refcount_changes(block.number)
+        block.state.db.cleanup(block.number)
         self.commit()  # batch commits all changes that came with the new block
         return True
 
@@ -332,7 +378,6 @@ class Chain(object):
             return self.head_candidate.transaction_count
         else:
             return 0
-
 
     def get_chain(self, start='', count=10):
         "return 'count' blocks starting from head or start"

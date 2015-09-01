@@ -4,18 +4,24 @@ from ethereum.slogging import get_logger
 import ethereum.abi as abi
 logger = get_logger()
 
+
 def test_abi_encode_var_sized_array():
-    d = ['0' * 40] * 3
-    r = abi.encode_abi(['address[]'], [d])
-    assert abi.decode_abi(['address[]'], r)[0] == d
+    abi.encode_abi(['address[]'], [[b'\x00' * 20] * 3])
+
 
 def test_abi_encode_fixed_size_array():
     abi.encode_abi(['uint16[2]'], [[5, 6]])
 
 
+def test_abi_encode_signed_int():
+    assert abi.decode_abi(['int8'], abi.encode_abi(['int8'], [1]))[0] == 1
+    assert abi.decode_abi(['int8'], abi.encode_abi(['int8'], [-1]))[0] == -1
+
+
 # SETUP TESTS IN GLOBAL NAME SPACE
 def gen_func(filename, testname, testdata):
     return lambda: do_test_state(filename, testname, testdata)
+
 
 def do_test_state(filename, testname=None, testdata=None, limit=99999999):
     logger.debug('running test:%r in %r' % (testname, filename))
