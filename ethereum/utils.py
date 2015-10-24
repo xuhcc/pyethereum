@@ -1,12 +1,9 @@
-
-from sha3 import sha3_256
 try:
-    sha3_256('.')
-except TypeError:
-    from python_sha3 import sha3_256
+    from keccak import sha3_256  # pypy
+except ImportError:
+    from sha3 import sha3_256 as _sha3_256
+    sha3_256 = lambda x: _sha3_256(x).digest()
 from bitcoin import privtopub
-import struct
-import os
 import sys
 import rlp
 from rlp.sedes import big_endian_int, BigEndianInt, Binary
@@ -33,6 +30,10 @@ if sys.version_info.major == 2:
             return value
         return int_to_big_endian(value)
 
+    def to_string_for_regexp(value):
+        return str(value)
+    unicode = unicode
+
 else:
     is_numeric = lambda x: isinstance(x, int)
     is_string = lambda x: isinstance(x, bytes)
@@ -49,6 +50,12 @@ else:
         if isinstance(value, bytes):
             return value
         return int_to_big_endian(value)
+
+    def to_string_for_regexp(value):
+        return str(to_string(value), 'utf-8')
+    unicode = str
+
+isnumeric = is_numeric
 
 
 def safe_ord(value):
@@ -118,15 +125,47 @@ def sha3_count(seed):
 
 
 def sha3(seed):
-    return sha3_256(seed).digest()
+    return sha3_256(to_string(seed))
+assert sha3('').encode('hex') == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
 
 sha3 = sha3_count
 
 
-def privtoaddr(x):
+def privtoaddr(x, extended=False):
     if len(x) > 32:
         x = decode_hex(x)
-    return sha3(privtopub(x)[1:])[12:]
+    o = sha3(privtopub(x)[1:])[12:]
+    return add_checksum(o) if extended else o
+
+
+def add_checksum(x):
+    if len(x) in (40, 48):
+        x = decode_hex(x)
+    if len(x) == 24:
+        return x
+    return x + sha3(x)[:4]
+
+
+def check_and_strip_checksum(x):
+    if len(x) in (40, 48):
+        x = decode_hex(x)
+    assert len(x) == 24 and sha3(x[:20])[:4] == x[-4:]
+    return x[:20]
+
+
+def normalize_address(x, allow_blank=False):
+    if allow_blank and x == '':
+        return ''
+    if len(x) in (42, 50) and x[:2] == '0x':
+        x = x[2:]
+    if len(x) in (40, 48):
+        x = decode_hex(x)
+    if len(x) == 24:
+        assert len(x) == 24 and sha3(x[:20])[:4] == x[-4:]
+        x = x[:20]
+    if len(x) != 20:
+        raise Exception("Invalid address format!")
+    return x
 
 
 def zpad(x, l):
@@ -182,6 +221,17 @@ def coerce_to_bytes(x):
         return decode_hex(x)
     else:
         return x
+
+
+def parse_int_or_hex(s):
+    if is_numeric(s):
+        return s
+    elif s[:2] in (b'0x', '0x'):
+        s = to_string(s)
+        tail = (b'0' if len(s) % 2 else b'') + s[2:]
+        return big_endian_to_int(decode_hex(tail))
+    else:
+        return int(s)
 
 
 def ceil32(x):
@@ -246,14 +296,14 @@ def encode_int256(v):
 
 
 def scan_bin(v):
-    if v[:2] == '0x':
+    if v[:2] in ('0x', b'0x'):
         return decode_hex(v[2:])
     else:
         return decode_hex(v)
 
 
 def scan_int(v):
-    if v[:2] == '0x':
+    if v[:2] in ('0x', b'0x'):
         return big_endian_to_int(decode_hex(v[2:]))
     else:
         return int(v)
@@ -292,6 +342,15 @@ scanners = {
     "trie_root": lambda x: scan_bin,
     "int256b": lambda x: big_endian_to_int(decode_hex(x))
 }
+
+
+def int_to_hex(x):
+    o = encode_hex(encode_int(x))
+    return '0x' + (o[1:] if (len(o) > 0 and o[0] == '0') else o)
+
+
+def remove_0x_head(s):
+    return s[2:] if s[:2] == b'0x' else s
 
 
 def print_func_call(ignore_first_arg=False, max_call_number=100):
@@ -374,3 +433,20 @@ int32 = BigEndianInt(32)
 int256 = BigEndianInt(256)
 hash32 = Binary.fixed_length(32)
 trie_root = Binary.fixed_length(32, allow_empty=True)
+
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[91m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+def DEBUG(msg, *args, **kwargs):
+    from ethereum import slogging
+
+    slogging.DEBUG(msg, *args, **kwargs)

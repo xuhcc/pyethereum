@@ -2,8 +2,18 @@
 Ethereum -- Next generation cryptocurrency network
 ===================================================
 
-Ethereum Python Client
-======================
+.. image:: https://badges.gitter.im/Join%20Chat.svg
+   :alt: Join the chat at https://gitter.im/ethereum/pyethereum
+   :target: https://gitter.im/ethereum/pyethereum?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
+
+Ethereum Core Library
+=====================
+
+This is the Python core library of the Ethereum project.
+
+For the python based command line client see:
+https://github.com/ethereum/pyethapp
+
 
 +-----------+------------------+------------------+--------------------+--------------------+
 |           | Linux            | OSX              | Travis             | Coverage           |
@@ -21,6 +31,8 @@ Installation:
 
 
 ``git clone https://github.com/ethereum/pyethereum/``
+
+``cd pyethereum``
 
 ``python setup.py install``
 

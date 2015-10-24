@@ -1,3 +1,4 @@
+import re
 import subprocess
 import os
 import yaml  # use yaml instead of json to get non unicode
@@ -57,39 +58,87 @@ class solc_wrapper(object):
         return names
 
     @classmethod
-    def compile(cls, code):
+    def compile(cls, code, contract_name=''):
         "returns binary of last contract in code"
-        contracts = cls.combined(code)
-        return contracts[cls.contract_names(code)[-1]]['binary'].decode('hex')
+        sorted_contracts = cls.combined(code)
+        if contract_name:
+            idx = [x[0] for x in sorted_contracts].index(contract_name)
+        else:
+            idx = -1
+        return sorted_contracts[idx][1]['bin'].decode('hex')
 
     @classmethod
-    def mk_full_signature(cls, code):
+    def mk_full_signature(cls, code, contract_name=''):
         "returns signature of last contract in code"
-        contracts = cls.combined(code)
-        return contracts[cls.contract_names(code)[-1]]['json-abi']
+        sorted_contracts = cls.combined(code)
+        if contract_name:
+            idx = [x[0] for x in sorted_contracts].index(contract_name)
+        else:
+            idx = -1
+        return sorted_contracts[idx][1]['abi']
 
     @classmethod
     def combined(cls, code):
-        p = subprocess.Popen(['solc', '--combined-json', 'json-abi,binary'],
+        p = subprocess.Popen(['solc', '--add-std', '--optimize', '--combined-json', 'abi,bin,devdoc,userdoc'],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         stdoutdata, stderrdata = p.communicate(input=code)
         if p.returncode:
             raise CompileError('compilation failed')
         # contracts = json.loads(stdoutdata)['contracts']
         contracts = yaml.safe_load(stdoutdata)['contracts']
+
         for contract_name, data in contracts.items():
-            data['json-abi'] = yaml.safe_load(data['json-abi'])
-        return contracts
+            data['abi'] = yaml.safe_load(data['abi'])
+            data['devdoc'] = yaml.safe_load(data['devdoc'])
+            data['userdoc'] = yaml.safe_load(data['userdoc'])
+
+        names = cls.contract_names(code)
+        assert len(names) <= len(contracts)  # imported contracts are not returned
+        sorted_contracts = []
+        for name in names:
+            sorted_contracts.append((name, contracts[name]))
+
+        return sorted_contracts
+
+    @classmethod
+    def compiler_version(cls):
+        version_info = subprocess.check_output(['solc', '--version'])
+        match = re.search("^Version: ([0-9a-z.-]+)/", version_info, re.MULTILINE)
+        if match:
+            return match.group(1)
+
+    @classmethod
+    def compile_rich(cls, code):
+        """full format as returned by jsonrpc"""
+
+        return {
+            contract_name: {
+                'code': "0x" + contract.get('bin'),
+                'info': {
+                    'abiDefinition': contract.get('abi'),
+                    'compilerVersion': cls.compiler_version(),
+                    'developerDoc': contract.get('devdoc'),
+                    'language': 'Solidity',
+                    'languageVersion': '0',
+                    'source': code,
+                    'userDoc': contract.get('userdoc')
+                },
+            }
+            for contract_name, contract
+            in cls.combined(code)
+        }
 
 
-def get_solidity():
-    try:
-        import solidity
-        tester.languages['solidity'] = solidity
-    except ImportError:
-        if not solc_wrapper.compiler_available():
-            return None
-        return solc_wrapper
+def get_solidity(try_import=False):
+    if try_import:
+        try:
+            import solidity, tester
+            tester.languages['solidity'] = solidity
+        except ImportError:
+            pass
+    if not solc_wrapper.compiler_available():
+        return None
+    return solc_wrapper
 
 
 if __name__ == '__main__':

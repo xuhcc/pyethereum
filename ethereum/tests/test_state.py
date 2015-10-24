@@ -8,7 +8,7 @@ logger = get_logger()
 # customize VM log output to your needs
 # hint: use 'py.test' with the '-s' option to dump logs to the console
 if '--trace' in sys.argv:  # not default
-    # configure_logging(':trace')
+    configure_logging(':trace')
     sys.argv.remove('--trace')
 
 
@@ -46,7 +46,8 @@ else:
     for filename in filenames:
         tests = fixtures[filename]
         if 'stQuadraticComplexityTest.json' in filename or \
-                'stMemoryStressTest.json' in filename:
+                'stMemoryStressTest.json' in filename or \
+                'stPreCompiledContractsTransaction.json' in filename:
             continue
         for testname, testdata in list(tests.items()):
             func_name = 'test_%s_%s' % (filename, testname)

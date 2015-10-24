@@ -1,13 +1,21 @@
-from bitcoin import encode_pubkey
-from bitcoin import ecdsa_raw_sign, ecdsa_raw_recover, N, P
+from bitcoin import encode_pubkey, N, P
+try:
+    from c_secp256k1 import ecdsa_raw_sign, ecdsa_raw_recover
+except ImportError:
+    from bitcoin import ecdsa_raw_sign, ecdsa_raw_recover
 import rlp
 from rlp.sedes import big_endian_int, binary
 from rlp.utils import decode_hex, encode_hex
-
 from ethereum import bloom
 from ethereum import utils
+from ethereum.processblock import mk_contract_address, intrinsic_gas_used
 from ethereum.utils import TT256
 from ethereum.exceptions import InvalidTransaction
+from ethereum.slogging import get_logger
+log = get_logger('eth.chain.tx')
+
+# in the yellow paper it is specified that s should be smaller than secpk1n (eq.205)
+secpk1n = 115792089237316195423570985008687907852837564279074904382605163141518161494337
 
 
 class Transaction(rlp.Serializable):
@@ -42,37 +50,57 @@ class Transaction(rlp.Serializable):
         ('s', big_endian_int),
     ]
 
-    def __init__(self, nonce, gasprice, startgas, to, value, data,
-                 v=0, r=0, s=0):
-        if len(to) == 40:
-            to = decode_hex(to)
+    _sender = None
+
+    def __init__(self, nonce, gasprice, startgas, to, value, data, v=0, r=0, s=0):
+        to = utils.normalize_address(to, allow_blank=True)
         assert len(to) == 20 or len(to) == 0
-        super(Transaction, self).__init__(nonce, gasprice, startgas, to,
-                                          value, data, v, r, s)
+        super(Transaction, self).__init__(nonce, gasprice, startgas, to, value, data, v, r, s)
         self.logs = []
 
-        # Determine sender
         if self.gasprice >= TT256 or self.startgas >= TT256 or \
                 self.value >= TT256 or self.nonce >= TT256:
             raise InvalidTransaction("Values way too high!")
-        # signed?
-        if self.v:
-            if self.r >= N or self.s >= P or self.v < 27 or self.v > 28:
-                raise InvalidTransaction("Invalid signature values!")
-            rlpdata = rlp.encode(self, UnsignedTransaction)
-            rawhash = utils.sha3(rlpdata)
-            pub = encode_pubkey(
-                ecdsa_raw_recover(rawhash, (self.v, self.r, self.s)),
-                'bin')
-            self.sender = utils.sha3(pub[1:])[-20:]
-        else:
-            self.sender = 0
+        if self.startgas < intrinsic_gas_used(self):
+            raise InvalidTransaction("Startgas too low")
+
+        log.debug('deserialized tx', tx=encode_hex(self.hash)[:8])
+
+    @property
+    def sender(self):
+
+        if not self._sender:
+            # Determine sender
+            if self.v:
+                if self.r >= N or self.s >= P or self.v < 27 or self.v > 28 \
+                or self.r == 0 or self.s == 0 or self.s >= secpk1n:
+                    raise InvalidTransaction("Invalid signature values!")
+                log.debug('recovering sender')
+                rlpdata = rlp.encode(self, UnsignedTransaction)
+                rawhash = utils.sha3(rlpdata)
+                pub = ecdsa_raw_recover(rawhash, (self.v, self.r, self.s))
+                if pub is False:
+                    raise InvalidTransaction("Invalid signature values (x^3+7 is non-residue)")
+                if pub == (0, 0):
+                    raise InvalidTransaction("Invalid signature (zero privkey cannot sign)")
+                pub = encode_pubkey(pub, 'bin')
+                self._sender = utils.sha3(pub[1:])[-20:]
+                assert self.sender == self._sender
+            else:
+                self._sender = 0
+        return self._sender
+
+    @sender.setter
+    def sender(self, value):
+        self._sender = value
 
     def sign(self, key):
         """Sign this transaction with a private key.
 
         A potentially already existing signature would be overridden.
         """
+        if key in (0, '', '\x00' * 32):
+            raise InvalidTransaction("Zero privkey cannot sign")
         rawhash = utils.sha3(rlp.encode(self, UnsignedTransaction))
         self.v, self.r, self.s = ecdsa_raw_sign(rawhash, key)
         self.sender = utils.privtoaddr(key)
@@ -98,6 +126,19 @@ class Transaction(rlp.Serializable):
         d['sender'] = self.sender
         d['hash'] = encode_hex(self.hash)
         return d
+
+    def log_dict(self):
+        d = self.to_dict()
+        d['sender'] = encode_hex(d['sender'] or '')
+        d['to'] = encode_hex(d['to'])
+        return d
+
+    @property
+    def creates(self):
+        "returns the address of a contract created by this tx"
+        if self.to == '':
+            return mk_contract_address(self.sender, self.nonce)
+
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.hash == other.hash

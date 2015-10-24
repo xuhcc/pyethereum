@@ -18,8 +18,7 @@ def translate_keys(olddict, keymap, valueconv, deletes):
             o[keymap.get(k, k)] = valueconv(k, olddict[k])
     return o
 
-
-e = db._EphemDB()
+env = blocks.Env(db._EphemDB())
 
 translator_list = {
     "extra_data": "extraData",
@@ -43,7 +42,7 @@ def valueconv(k, v):
 
 
 def run_block_test(params):
-    b = blocks.genesis(e, params["pre"])
+    b = blocks.genesis(env, start_alloc=params["pre"])
     gbh = params["genesisBlockHeader"]
     b.bloom = utils.scanners['int256b'](gbh["bloom"])
     b.timestamp = utils.scanners['int'](gbh["timestamp"])
@@ -52,7 +51,7 @@ def run_block_test(params):
     b.gas_limit = utils.scanners['int'](gbh["gasLimit"])
     b.gas_used = utils.scanners['int'](gbh["gasUsed"])
     b.coinbase = utils.scanners['addr'](decode_hex(gbh["coinbase"]))
-    b.difficulty = int(gbh["difficulty"])
+    b.difficulty = utils.parse_int_or_hex(gbh["difficulty"])
     b.prevhash = utils.scanners['bin'](gbh["parentHash"])
     b.mixhash = utils.scanners['bin'](gbh["mixHash"])
     assert b.receipts.root_hash == \
@@ -67,20 +66,27 @@ def run_block_test(params):
     if b.hash != utils.scanners['bin'](gbh["hash"]):
         raise Exception("header hash mismatch")
     assert b.header.check_pow()
+    blockmap = {b.hash: b}
+    env.db.put(b.hash, rlp.encode(b))
     for blk in params["blocks"]:
         if 'blockHeader' not in blk:
             try:
                 rlpdata = decode_hex(blk["rlp"][2:])
-                b2 = rlp.decode(rlpdata, blocks.Block, parent=b, db=e)
-                success = True
+                blkparent = rlp.decode(
+                    rlp.encode(rlp.decode(rlpdata)[0]), blocks.BlockHeader).prevhash
+                b2 = rlp.decode(rlpdata, blocks.Block, parent=blockmap[blkparent], env=env)
+                success = b2.validate_uncles()
             except (ValueError, TypeError, AttributeError, VerificationFailed,
-                    DecodingError, DeserializationError, InvalidTransaction):
+                    DecodingError, DeserializationError, InvalidTransaction, KeyError):
                 success = False
             assert not success
         else:
             rlpdata = decode_hex(blk["rlp"][2:])
-            b2 = rlp.decode(rlpdata, blocks.Block, parent=b, db=e)
-            b = b2
+            blkparent = rlp.decode(rlp.encode(rlp.decode(rlpdata)[0]), blocks.BlockHeader).prevhash
+            b2 = rlp.decode(rlpdata, blocks.Block, parent=blockmap[blkparent], env=env)
+            assert b2.validate_uncles()
+            blockmap[b2.hash] = b2
+            env.db.put(b2.hash, rlp.encode(b2))
         # blkdict = b.to_dict(False, True, False, True)
         # assert blk["blockHeader"] == \
         #     translate_keys(blkdict["header"], translator_list, lambda y, x: x, [])
@@ -93,8 +99,14 @@ def run_block_test(params):
 
 
 def do_test_block(filename, testname=None, testdata=None, limit=99999999):
-    logger.debug('running test:%r in %r' % (testname, filename))
+    print('\nrunning test:%r in %r' % (testname, filename))
     run_block_test(testdata)
+
+excludes = [('bcWalletTest.json', u'walletReorganizeOwners'),
+            ('bl10251623GO.json', u'randomBlockTest'),
+            ('bl201507071825GO.json', u'randomBlockTest')
+            ]
+
 
 if __name__ == '__main__':
     assert len(sys.argv) >= 2, "Please specify file or dir name"
@@ -108,11 +120,12 @@ if __name__ == '__main__':
     else:
         for filename, tests in list(fixtures.items()):
             for testname, testdata in list(tests.items()):
-                print("Testing: %s %s" % (filename, testname))
-                run_block_test(testdata)
+                if (filename.split('/')[-1], testname) not in excludes:
+                    print("Testing: %s %s" % (filename, testname))
+                    run_block_test(testdata)
 else:
     fixtures = testutils.get_tests_from_file_or_dir(
-        os.path.join(testutils.fixture_path, 'BlockTests'))
+        os.path.join(testutils.fixture_path, 'BlockchainTests'))
 
     def mk_test_func(filename, testname, testdata):
         return lambda: do_test_block(filename, testname, testdata)
@@ -120,4 +133,6 @@ else:
     for filename, tests in list(fixtures.items()):
         for testname, testdata in list(tests.items())[:500]:
             func_name = 'test_%s_%s' % (filename, testname)
-            globals()[func_name] = mk_test_func(filename, testname, testdata)
+            if (filename.split('/')[-1], testname) not in excludes:
+                # print 'making function', (filename.split('/')[-1], testname)
+                globals()[func_name] = mk_test_func(filename, testname, testdata)

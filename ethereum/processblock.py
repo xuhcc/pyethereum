@@ -6,16 +6,16 @@ from ethereum import opcodes
 from ethereum import utils
 from ethereum import specials
 from ethereum import bloom
-from ethereum import vm
+from ethereum import vm as vm
 from ethereum.exceptions import *
-from ethereum.utils import safe_ord
+from ethereum.utils import safe_ord, normalize_address
 
 sys.setrecursionlimit(100000)
 
 from ethereum.slogging import get_logger
-log_tx = get_logger('eth.tx')
-log_msg = get_logger('eth.msg')
-log_state = get_logger('eth.msg.state')
+log_tx = get_logger('eth.pb.tx')
+log_msg = get_logger('eth.pb.msg')
+log_state = get_logger('eth.pb.msg.state')
 
 TT255 = 2 ** 255
 TT256 = 2 ** 256
@@ -27,11 +27,15 @@ OUT_OF_GAS = -1
 CREATE_CONTRACT_ADDRESS = b''
 
 
+def mk_contract_address(sender, nonce):
+    return utils.sha3(rlp.encode([normalize_address(sender), nonce]))[12:]
+
+
 def verify(block, parent):
     from ethereum import blocks
     try:
         block2 = rlp.decode(rlp.encode(block), blocks.Block,
-                            db=parent.db, parent=parent)
+                            env=parent.env, parent=parent)
         assert block == block2
         return True
     except blocks.VerificationFailed:
@@ -71,55 +75,69 @@ class Log(rlp.Serializable):
             (encode_hex(self.address), self.topics, self.data)
 
 
-def apply_transaction(block, tx):
+def intrinsic_gas_used(tx):
+    num_zero_bytes = str_to_bytes(tx.data).count(ascii_chr(0))
+    num_non_zero_bytes = len(tx.data) - num_zero_bytes
+    return (opcodes.GTXCOST
+            + opcodes.GTXDATAZERO * num_zero_bytes
+            + opcodes.GTXDATANONZERO * num_non_zero_bytes)
 
-    def rp(actual, target):
-        return '%r, actual:%r target:%r' % (tx, actual, target)
+
+def validate_transaction(block, tx):
+
+    def rp(what, actual, target):
+        return '%r: %r actual:%r target:%r' % (tx, what, actual, target)
 
     # (1) The transaction signature is valid;
-    if not tx.sender:
+    if not tx.sender:  # sender is set and validated on Transaction initialization
         raise UnsignedTransaction(tx)
 
     # (2) the transaction nonce is valid (equivalent to the
     #     sender account's current nonce);
     acctnonce = block.get_nonce(tx.sender)
     if acctnonce != tx.nonce:
-        raise InvalidNonce(rp(tx.nonce, acctnonce))
+        raise InvalidNonce(rp('nonce', tx.nonce, acctnonce))
 
     # (3) the gas limit is no smaller than the intrinsic gas,
     # g0, used by the transaction;
-    num_zero_bytes = str_to_bytes(tx.data).count(ascii_chr(0))
-    num_non_zero_bytes = len(tx.data) - num_zero_bytes
-    intrinsic_gas_used = (opcodes.GTXCOST
-                          + opcodes.GTXDATAZERO * num_zero_bytes
-                          + opcodes.GTXDATANONZERO * num_non_zero_bytes)
-    if tx.startgas < intrinsic_gas_used:
-        raise InsufficientStartGas(rp(tx.startgas, intrinsic_gas_used))
+    if tx.startgas < intrinsic_gas_used(tx):
+        raise InsufficientStartGas(rp('startgas', tx.startgas, intrinsic_gas_used))
 
     # (4) the sender account balance contains at least the
     # cost, v0, required in up-front payment.
     total_cost = tx.value + tx.gasprice * tx.startgas
     if block.get_balance(tx.sender) < total_cost:
-        raise InsufficientBalance(
-            rp(block.get_balance(tx.sender), total_cost))
+        raise InsufficientBalance(rp('balance', block.get_balance(tx.sender), total_cost))
 
     # check block gas limit
     if block.gas_used + tx.startgas > block.gas_limit:
-        raise BlockGasLimitReached(rp(block.gas_used + tx.startgas, block.gas_limit))
+        raise BlockGasLimitReached(rp('gaslimit', block.gas_used + tx.startgas, block.gas_limit))
 
-    log_tx.debug('TX NEW', tx=encode_hex(tx.hash), tx_dict=tx.to_dict())
+    return True
+
+
+def apply_transaction(block, tx):
+    validate_transaction(block, tx)
+
+    log_tx.debug('TX NEW', tx_dict=tx.log_dict())
     # start transacting #################
     block.increment_nonce(tx.sender)
     # print block.get_nonce(tx.sender), '@@@'
 
+    intrinsic_gas = intrinsic_gas_used(tx)
+    if block.number >= block.config['HOMESTEAD_FORK_BLKNUM']:
+        assert tx.s * 2 < transactions.secpk1n
+        if not tx.to or tx.to == CREATE_CONTRACT_ADDRESS:
+            intrinsic_gas += opcodes.CREATE[3]
+            if tx.startgas < intrinsic_gas:
+                raise InsufficientStartGas(rp('startgas', tx.startgas, intrinsic_gas))
+                
     # buy startgas
     assert block.get_balance(tx.sender) >= tx.startgas * tx.gasprice
     block.delta_balance(tx.sender, -tx.startgas * tx.gasprice)
-
-    message_gas = tx.startgas - intrinsic_gas_used
+    message_gas = tx.startgas - intrinsic_gas
     message_data = vm.CallData([safe_ord(x) for x in tx.data], 0, len(tx.data))
-    message = vm.Message(tx.sender, tx.to, tx.value, message_gas, message_data,
-                         code_address=tx.to)
+    message = vm.Message(tx.sender, tx.to, tx.value, message_gas, message_data, code_address=tx.to)
 
     # MESSAGE
     ext = VMExt(block, tx)
@@ -146,7 +164,7 @@ def apply_transaction(block, tx):
     else:
         log_tx.debug('TX SUCCESS', data=data)
         gas_used = tx.startgas - gas_remained
-        block.refunds += len(block.suicides) * opcodes.GSUICIDEREFUND
+        block.refunds += len(set(block.suicides)) * opcodes.GSUICIDEREFUND
         if block.refunds > 0:
             log_tx.debug('Refunding', gas_refunded=min(block.refunds, gas_used // 2))
             gas_remained += min(block.refunds, gas_used // 2)
@@ -166,6 +184,7 @@ def apply_transaction(block, tx):
     block.suicides = []
     for s in suicides:
         block.ether_delta -= block.get_balance(s)
+        block.set_balance(s, 0)
         block.del_account(s)
     block.add_transaction_to_list(tx)
     block.logs = []
@@ -188,7 +207,7 @@ class VMExt():
         self.add_suicide = lambda x: block.suicides.append(x)
         self.add_refund = lambda x: \
             setattr(block, 'refunds', block.refunds + x)
-        self.block_hash = lambda x: block.get_ancestor(block.number - x).hash \
+        self.block_hash = lambda x: block.get_ancestor_hash(block.number - x) \
             if (1 <= block.number - x <= 256 and x <= block.number) else b''
         self.block_coinbase = block.coinbase
         self.block_timestamp = block.timestamp
@@ -200,7 +219,7 @@ class VMExt():
         self.tx_origin = tx.sender
         self.tx_gasprice = tx.gasprice
         self.create = lambda msg: create_contract(self, msg)
-        self.msg = lambda msg: apply_msg(self, msg)
+        self.msg = lambda msg: _apply_msg(self, msg, self.get_code(msg.code_address))
         self.account_exists = block.account_exists
 
 
@@ -209,17 +228,22 @@ def apply_msg(ext, msg):
 
 
 def _apply_msg(ext, msg, code):
-    if log_msg.is_active('trace'):
+    trace_msg = log_msg.is_active('trace')
+    if trace_msg:
         log_msg.debug("MSG APPLY", sender=encode_hex(msg.sender), to=encode_hex(msg.to),
                       gas=msg.gas, value=msg.value,
                       data=encode_hex(msg.data.extract_all()))
-    if log_state.is_active('trace'):
-        log_state.trace('MSG PRE STATE', account=msg.to, bal=ext.get_balance(
-            msg.to), state=ext.log_storage(msg.to))
+        if log_state.is_active('trace'):
+            log_state.trace('MSG PRE STATE SENDER', account=msg.sender,
+                            bal=ext.get_balance(msg.sender),
+                            state=ext.log_storage(msg.sender))
+            log_state.trace('MSG PRE STATE RECIPIENT', account=msg.to,
+                            bal=ext.get_balance(msg.to),
+                            state=ext.log_storage(msg.to))
+        # log_state.trace('CODE', code=code)
     # Transfer value, instaquit if not enough
     snapshot = ext._block.snapshot()
-    o = ext._block.transfer_value(msg.sender, msg.to, msg.value)
-    if not o:
+    if not ext._block.transfer_value(msg.sender, msg.to, msg.value):
         log_msg.debug('MSG TRANSFER FAILED', have=ext.get_balance(msg.to),
                       want=msg.value)
         return 1, msg.gas, []
@@ -228,14 +252,18 @@ def _apply_msg(ext, msg, code):
         res, gas, dat = specials.specials[msg.code_address](ext, msg)
     else:
         res, gas, dat = vm.vm_execute(ext, msg, code)
-    gas = int(gas)
-    assert utils.is_numeric(gas)
-    if log_msg.is_active('trace'):
-        log_msg.debug('MSG APPLIED', result=o, gas_remained=gas,
+    # gas = int(gas)
+    # assert utils.is_numeric(gas)
+    if trace_msg:
+        log_msg.debug('MSG APPLIED', gas_remained=gas,
                       sender=msg.sender, to=msg.to, data=dat)
-    if log_state.is_active('trace'):
-        log_state.trace('MSG POST STATE', account=msg.to, bal=ext.get_balance(
-            msg.to), state=ext.log_storage(msg.to))
+        if log_state.is_active('trace'):
+            log_state.trace('MSG PRE STATE SENDER', account=msg.sender,
+                            bal=ext.get_balance(msg.sender),
+                            state=ext.log_storage(msg.sender))
+            log_state.trace('MSG PRE STATE RECIPIENT', account=msg.to,
+                            bal=ext.get_balance(msg.to),
+                            state=ext.log_storage(msg.to))
 
     if res == 0:
         log_msg.debug('REVERTING')
@@ -250,7 +278,7 @@ def create_contract(ext, msg):
     if ext.tx_origin != msg.sender:
         ext._block.increment_nonce(msg.sender)
     nonce = utils.encode_int(ext._block.get_nonce(msg.sender) - 1)
-    msg.to = utils.sha3(rlp.encode([sender, nonce]))[12:]
+    msg.to = mk_contract_address(sender, nonce)
     b = ext.get_balance(msg.to)
     if b > 0:
         ext.set_balance(msg.to, b)
@@ -273,6 +301,8 @@ def create_contract(ext, msg):
         else:
             dat = []
             #print('CONTRACT CREATION OOG', 'have', gas, 'want', gcost)
+            if ext._block.number >= ext._block.config['HOMESTEAD_FORK_BLKNUM']:
+                return 0, 0, b''
             log_msg.debug('CONTRACT CREATION OOG', have=gas, want=gcost)
         ext._block.set_code(msg.to, b''.join(map(ascii_chr, dat)))
         return 1, gas, msg.to

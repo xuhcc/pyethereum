@@ -961,8 +961,8 @@ def test_saveload2():
     s = tester.state()
     c = s.contract(saveload_code2)
     s.send(tester.k0, c, 0)
-    assert bitcoin.encode(s.block.get_storage_data(c, 0), 256) == '01ab' + '\x00' * 28
-    assert bitcoin.encode(s.block.get_storage_data(c, 1), 256) == '01ab' + '\x00' * 28
+    assert bitcoin.encode(s.block.get_storage_data(c, 0), 256) == b'01ab' + b'\x00' * 28
+    assert bitcoin.encode(s.block.get_storage_data(c, 1), 256) == b'01ab' + b'\x00' * 28
 
 
 sdiv_code = """
@@ -1265,8 +1265,8 @@ macro fixedp($x) / fixedp($y):
 macro raw_unfixedp(fixedp($x)):
     $x / 2^64
 
-macro fixify($x):
-    fixedp($x * 2^64)
+macro set(fixedp($x), $y):
+    $x = 2^64 * $y
 
 macro fixedp($x) = fixedp($y):
     $x = $y
@@ -1363,7 +1363,7 @@ def test_mcopy():
     s = tester.state()
     c = s.abi_contract(mcopy_code)
     assert c.mcopy_test("123", 5, 6, 259) == \
-        '\x00'*31+'\x05'+'\x00'*31+'\x06'+'\x00'*30+'\x01\x03'+'123'
+        b'\x00'*31+b'\x05'+b'\x00'*31+b'\x06'+b'\x00'*30+b'\x01\x03'+b'123'
 
 
 mcopy_code_2 = """
@@ -1383,7 +1383,7 @@ def test_mcopy2():
     s = tester.state()
     c = s.abi_contract(mcopy_code_2)
     assert c.mcopy_test() == \
-        ''.join([utils.zpad(utils.int_to_big_endian(x), 32) for x in [99, 111, 119]])
+        b''.join([utils.zpad(utils.int_to_big_endian(x), 32) for x in [99, 111, 119]])
 
 
 array_saveload_code = """
@@ -1483,6 +1483,7 @@ abi_logging_code = """
 event rabbit(x)
 event frog(y:indexed)
 event moose(a, b:str, c:indexed, d:arr)
+event chicken(m:address:indexed)
 
 def test_rabbit(eks):
     log(type=rabbit, eks)
@@ -1492,6 +1493,9 @@ def test_frog(why):
 
 def test_moose(eh, bee:str, see, dee:arr):
     log(type=moose, eh, bee, see, dee)
+
+def test_chicken(em:address):
+    log(type=chicken, em)
 """
 
 
@@ -1501,14 +1505,134 @@ def test_abi_logging():
     o = []
     s.block.log_listeners.append(lambda x: o.append(c._translator.listen(x)))
     c.test_rabbit(3)
-    assert o == [{"_event_type": "rabbit", "x": 3}]
+    assert o == [{"_event_type": b"rabbit", "x": 3}]
     o.pop()
     c.test_frog(5)
-    assert o == [{"_event_type": "frog", "y": 5}]
+    assert o == [{"_event_type": b"frog", "y": 5}]
     o.pop()
     c.test_moose(7, "nine", 11, [13, 15, 17])
-    assert o == [{"_event_type": "moose", "a": 7, "b": "nine",
+    assert o == [{"_event_type": b"moose", "a": 7, "b": b"nine",
                  "c": 11, "d": [13, 15, 17]}]
+    o.pop()
+    c.test_chicken(tester.a0)
+    assert o == [{"_event_type": b"chicken",
+                  "m": utils.encode_hex(tester.a0)}]
+    o.pop()
+
+
+new_format_inner_test_code = """
+def foo(a, b:arr, c:str):
+    return a * 10 + b[1]
+"""
+
+filename4 = "nfitc2635987162498621846198246.se"
+
+new_format_outer_test_code = """
+extern blah: [foo:[int256,int256[],bytes]:int256]
+
+def bar():
+    x = create("%s")
+    return x.foo(17, [3, 5, 7], text("dog"))
+""" % filename4
+
+
+def test_new_format():
+    s = tester.state()
+    open(filename4, 'w').write(new_format_inner_test_code)
+    c = s.abi_contract(new_format_outer_test_code)
+    assert c.bar() == 175
+
+
+abi_address_output_test_code = """
+data addrs[]
+
+def get_address(key):
+    return(self.addrs[key]:address)
+
+def register(key, addr:address):
+    if not self.addrs[key]:
+        self.addrs[key] = addr
+"""
+
+
+def test_abi_address_output():
+    s = tester.state()
+    c = s.abi_contract(abi_address_output_test_code)
+    c.register(123, b'1212121212121212121212121212121212121212')
+    c.register(123, b'3434343434343434343434343434343434343434')
+    c.register(125, b'5656565656565656565656565656565656565656')
+    assert c.get_address(123) == b'1212121212121212121212121212121212121212'
+    assert c.get_address(125) == b'5656565656565656565656565656565656565656'
+
+filename5 = 'abi_output_tester_1264876521746198724124'
+
+abi_address_caller_code = """
+extern foo: [get_address:[int256]:address, register:[int256,address]:_]
+data sub
+
+def init():
+    self.sub = create("%s")
+
+def get_address(key):
+    return(self.sub.get_address(key):address)
+
+def register(key, addr:address):
+    self.sub.register(key, addr)
+""" % filename5
+
+
+def test_inner_abi_address_output():
+    s = tester.state()
+    open(filename5, 'w').write(abi_address_output_test_code)
+    c = s.abi_contract(abi_address_caller_code)
+    c.register(123, b'1212121212121212121212121212121212121212')
+    c.register(123, b'3434343434343434343434343434343434343434')
+    c.register(125, b'5656565656565656565656565656565656565656')
+    assert c.get_address(123) == b'1212121212121212121212121212121212121212'
+    assert c.get_address(125) == b'5656565656565656565656565656565656565656'
+
+
+string_logging_code = """
+event foo(x:string:indexed, y:bytes:indexed, z:str:indexed)
+
+def moo():
+    log(type=foo, text("bob"), text("cow"), text("dog"))
+"""
+
+
+def test_string_logging():
+    s = tester.state()
+    c = s.abi_contract(string_logging_code)
+    o = []
+    s.block.log_listeners.append(lambda x: o.append(c._translator.listen(x)))
+    c.moo()
+    assert o == [{"_event_type": "foo", "x": "bob", "__hash_x": utils.sha3("bob"),
+                  "y": "cow", "__hash_y": utils.sha3("cow"), "z": "dog",
+                  "__hash_z": utils.sha3("dog")}]
+
+
+params_code = """
+data blah
+
+
+def init():
+    self.blah = $FOO
+
+
+def garble():
+    return(self.blah)
+
+def marble():
+    return(text($BAR):str)
+"""
+
+
+def test_params_contract():
+    s = tester.state()
+    c = s.abi_contract(params_code, FOO=4, BAR='horse')
+    assert c.garble() == 4
+    assert c.marble() == 'horse'
+    
 
 
 # test_evm = None
@@ -1556,3 +1680,7 @@ def test_abi_logging():
 # test_more_infinite_storage = None
 # test_double_array = None
 # test_abi_logging = None
+# test_new_format = None
+# test_abi_address_output = None
+# test_string_logging = None
+# test_params_contract = None

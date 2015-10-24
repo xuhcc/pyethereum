@@ -1,3 +1,10 @@
+#  ####### dev hack flags ###############
+
+verify_stack_after_op = False
+
+#  ######################################
+import sys
+
 from ethereum import utils
 from ethereum.abi import is_numeric
 import copy
@@ -5,7 +12,7 @@ from ethereum import opcodes
 import time
 from ethereum.slogging import get_logger
 from rlp.utils import encode_hex, ascii_chr
-from ethereum.utils import to_string, safe_ord
+from ethereum.utils import to_string
 
 log_log = get_logger('eth.vm.log')
 log_vm_exit = get_logger('eth.vm.exit')
@@ -78,16 +85,17 @@ class Compustate():
 # Preprocesses code, and determines which locations are in the middle
 # of pushdata and thus invalid
 def preprocess_code(code):
-    i = 0
+    assert isinstance(code, bytes)
+    code = memoryview(code).tolist()
     ops = []
+    i = 0
     while i < len(code):
-        o = copy.copy(opcodes.opcodes.get(safe_ord(code[i]), ['INVALID', 0, 0, 0]) +
-                      [safe_ord(code[i]), 0])
+        o = copy.copy(opcodes.opcodes.get(code[i], ['INVALID', 0, 0, 0]) + [code[i], 0])
         ops.append(o)
         if o[0][:4] == 'PUSH':
             for j in range(int(o[0][4:])):
                 i += 1
-                byte = safe_ord(code[i]) if i < len(code) else 0
+                byte = code[i] if i < len(code) else 0
                 o[-1] = (o[-1] << 8) + byte
                 if i < len(code):
                     ops.append(['INVALID', 0, 0, 0, byte, 0])
@@ -118,7 +126,7 @@ def mem_extend(mem, compustate, op, start, sz):
 
 def data_copy(compustate, size):
     if size:
-        copyfee = opcodes.GCOPY * utils.ceil32(size) / 32
+        copyfee = opcodes.GCOPY * utils.ceil32(size) // 32
         if compustate.gas < copyfee:
             compustate.gas = 0
             return False
@@ -157,6 +165,8 @@ def vm_execute(ext, msg, code):
 
     s = time.time()
     op = None
+    steps = 0
+    _prevop = None  # for trace only
 
     while 1:
         # print 'op: ', op, time.time() - s
@@ -178,8 +188,10 @@ def vm_execute(ext, msg, code):
                                 op=op, needed=to_string(in_args),
                                 available=to_string(len(compustate.stack)))
 
-        if len(compustate.stack) + out_args > 1024:
-            return vm_exception('STACK SIZE LIMIT EXCEEDED')
+        if len(compustate.stack) - in_args + out_args > 1024:
+            return vm_exception('STACK SIZE LIMIT EXCEEDED',
+                                op=op,
+                                pre_height=to_string(len(compustate.stack)))
 
         # Apply operation
         compustate.gas -= fee
@@ -189,23 +201,37 @@ def vm_execute(ext, msg, code):
             """
             This diverges from normal logging, as we use the logging namespace
             only to decide which features get logged in 'eth.vm.op'
-            i.e. tracing can not be activated by activating a sub like 'eth.vm.op.stack'
+            i.e. tracing can not be activated by activating a sub
+            like 'eth.vm.op.stack'
             """
             trace_data = {}
-            if log_vm_op_stack.is_active():
-                trace_data['stack'] = list(map(to_string, list(compustate.stack)))
-            if log_vm_op_memory.is_active():
-                trace_data['memory'] = \
-                    b''.join([encode_hex(ascii_chr(x)) for x in compustate.memory])
-            if log_vm_op_storage.is_active():
+            trace_data['stack'] = list(map(to_string, list(compustate.stack)))
+            if _prevop in ('MLOAD', 'MSTORE', 'MSTORE8', 'SHA3', 'CALL',
+                           'CALLCODE', 'CREATE', 'CALLDATACOPY', 'CODECOPY',
+                           'EXTCODECOPY'):
+                if len(compustate.memory) < 1024:
+                    trace_data['memory'] = \
+                        b''.join([encode_hex(ascii_chr(x)) for x
+                                  in compustate.memory])
+                else:
+                    trace_data['sha3memory'] = \
+                        encode_hex(utils.sha3(''.join([ascii_chr(x) for
+                                              x in compustate.memory])))
+            if _prevop in ('SSTORE', 'SLOAD') or steps == 0:
                 trace_data['storage'] = ext.log_storage(msg.to)
             trace_data['gas'] = to_string(compustate.gas + fee)
+            trace_data['inst'] = opcode
             trace_data['pc'] = to_string(compustate.pc - 1)
+            if steps == 0:
+                trace_data['depth'] = msg.depth
+                trace_data['address'] = msg.to
             trace_data['op'] = op
+            trace_data['steps'] = steps
             if op[:4] == 'PUSH':
                 trace_data['pushvalue'] = pushval
-
             log_vm_op.trace('vm', **trace_data)
+            steps += 1
+            _prevop = op
 
         # Invalid operation
         if op == 'INVALID':
@@ -345,13 +371,14 @@ def vm_execute(ext, msg, code):
                 addr = utils.coerce_addr_to_hex(stk.pop() % 2**160)
                 start, s2, size = stk.pop(), stk.pop(), stk.pop()
                 extcode = ext.get_code(addr) or b''
+                assert utils.is_string(extcode)
                 if not mem_extend(mem, compustate, op, start, size):
                     return vm_exception('OOG EXTENDING MEMORY')
                 if not data_copy(compustate, size):
                     return vm_exception('OOG COPY DATA')
                 for i in range(size):
                     if s2 + i < len(extcode):
-                        mem[start + i] = safe_ord(extcode[s2 + i])
+                        mem[start + i] = utils.safe_ord(extcode[s2 + i])
                     else:
                         mem[start + i] = 0
         elif opcode < 0x50:
@@ -458,8 +485,8 @@ def vm_execute(ext, msg, code):
                 return vm_exception('OOG EXTENDING MEMORY')
             data = b''.join(map(ascii_chr, mem[mstart: mstart + msz]))
             ext.log(msg.to, topics, data)
-            log_log.trace('LOG', to=msg.to, topics=topics, data=list(map(safe_ord, data)))
-            # print('LOG', msg.to, topics, list(map(safe_ord, data)))
+            log_log.trace('LOG', to=msg.to, topics=topics, data=list(map(utils.safe_ord, data)))
+            # print('LOG', msg.to, topics, list(map(ord, data)))
 
         elif op == 'CREATE':
             value, mstart, msz = stk.pop(), stk.pop(), stk.pop()
@@ -489,7 +516,7 @@ def vm_execute(ext, msg, code):
                 (value > 0) * opcodes.GCALLVALUETRANSFER
             submsg_gas = gas + opcodes.GSTIPEND * (value > 0)
             if compustate.gas < gas + extra_gas:
-                return vm_exception('OUT OF GAS')
+                return vm_exception('OUT OF GAS', needed=gas+extra_gas)
             if ext.get_balance(msg.to) >= value and msg.depth < 1024:
                 compustate.gas -= (gas + extra_gas)
                 cd = CallData(mem, meminstart, meminsz)
@@ -515,7 +542,7 @@ def vm_execute(ext, msg, code):
             extra_gas = (value > 0) * opcodes.GCALLVALUETRANSFER
             submsg_gas = gas + opcodes.GSTIPEND * (value > 0)
             if compustate.gas < gas + extra_gas:
-                return vm_exception('OUT OF GAS')
+                return vm_exception('OUT OF GAS', needed=gas+extra_gas)
             if ext.get_balance(msg.to) >= value and msg.depth < 1024:
                 compustate.gas -= (gas + extra_gas)
                 to = utils.encode_int(to)
@@ -543,14 +570,16 @@ def vm_execute(ext, msg, code):
             to = utils.encode_int(stk.pop())
             to = ((b'\x00' * (32 - len(to))) + to)[12:]
             xfer = ext.get_balance(msg.to)
-            ext.set_balance(msg.to, 0)
             ext.set_balance(to, ext.get_balance(to) + xfer)
+            ext.set_balance(msg.to, 0)
             ext.add_suicide(msg.to)
             # print('suiciding %s %s %d' % (msg.to, to, xfer))
             return 1, compustate.gas, []
-        for a in stk:
-            assert is_numeric(a)
-            assert a >= 0 and a < 2**256, (a, op, stk)
+
+        # this is slow!
+        # for a in stk:
+        #     assert is_numeric(a), (op, stk)
+        #     assert a >= 0 and a < 2**256, (a, op, stk)
 
 
 class VmExtBase():

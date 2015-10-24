@@ -8,6 +8,7 @@ import ethereum.opcodes as opcodes
 import ethereum.abi as abi
 from ethereum.slogging import LogRecorder, configure_logging, set_level
 from ethereum.utils import to_string
+from ethereum.config import Env
 from ethereum._solidity import get_solidity
 import rlp
 from rlp.utils import decode_hex, encode_hex, ascii_chr
@@ -64,6 +65,58 @@ def rand():
     return seed % 2 ** 256
 
 
+class TransactionFailed(Exception):
+    pass
+
+
+class ContractCreationFailed(Exception):
+    pass
+
+
+class ABIContract():
+
+    def __init__(self, _state, _abi, address, listen=True, log_listener=None):
+        self.address = address
+        self._translator = abi.ContractTranslator(_abi)
+        self.abi = _abi
+
+        if listen:
+            if not log_listener:
+                listener = lambda log: self._translator.listen(log, noprint=False)
+            else:
+                def listener(log):
+                    r = self._translator.listen(log, noprint=True)
+                    if r:
+                        log_listener(r)
+            _state.block.log_listeners.append(listener)
+
+        def kall_factory(f):
+
+            def kall(*args, **kwargs):
+                o = _state._send(kwargs.get('sender', k0),
+                                 self.address,
+                                 kwargs.get('value', 0),
+                                 self._translator.encode(f, args),
+                                 **dict_without(kwargs, 'sender', 'value', 'output'))
+                # Compute output data
+                if kwargs.get('output', '') == 'raw':
+                    outdata = o['output']
+                elif not o['output']:
+                    outdata = None
+                else:
+                    outdata = self._translator.decode(f, o['output'])
+                    outdata = outdata[0] if len(outdata) == 1 else outdata
+                # Format output
+                if kwargs.get('profiling', ''):
+                    return dict_with(o, output=outdata)
+                else:
+                    return outdata
+            return kall
+
+        for f in self._translator.function_data:
+            vars(self)[f] = kall_factory(f)
+
+
 class state():
 
     def __init__(self, num_accounts=len(keys)):
@@ -73,13 +126,14 @@ class state():
 
         self.temp_data_dir = tempfile.mkdtemp()
         self.db = db.EphemDB()
+        self.env = Env(self.db)
 
         o = {}
         for i in range(num_accounts):
             o[accounts[i]] = {"wei": 10 ** 24}
         for i in range(1, 5):
             o[u.int_to_addr(i)] = {"wei": 1}
-        self.block = b.genesis(self.db, o)
+        self.block = b.genesis(self.env, start_alloc=o)
         self.blocks = [self.block]
         self.block.timestamp = 1410973349
         self.block.coinbase = a0
@@ -97,65 +151,32 @@ class state():
         assert len(self.block.get_code(o)), "Contract code empty"
         return o
 
-    def abi_contract(me, code, sender=k0, endowment=0, language='serpent', gas=None):
-
-        class _abi_contract():
-
-            def __init__(self, _state, code, sender=k0,
-                         endowment=0, language='serpent'):
-                if language not in languages:
-                    languages[language] = __import__(language)
-                language = languages[language]
-                evm = language.compile(code)
-                self.address = me.evm(evm, sender, endowment, gas)
-                assert len(me.block.get_code(self.address)), \
-                    "Contract code empty"
-                sig = language.mk_full_signature(code)
-                self._translator = abi.ContractTranslator(sig)
-
-                def kall_factory(f):
-
-                    def kall(*args, **kwargs):
-                        _state.block.log_listeners.append(
-                            lambda log: self._translator.listen(log))
-                        o = _state._send(kwargs.get('sender', k0),
-                                         self.address,
-                                         kwargs.get('value', 0),
-                                         self._translator.encode(f, args),
-                                         **dict_without(kwargs, 'sender',
-                                                        'value', 'output'))
-                        _state.block.log_listeners.pop()
-                        # Compute output data
-                        if kwargs.get('output', '') == 'raw':
-                            outdata = o['output']
-                        elif not o['output']:
-                            outdata = None
-                        else:
-                            outdata = self._translator.decode(f, o['output'])
-                            outdata = outdata[0] if len(outdata) == 1 \
-                                else outdata
-                        # Format output
-                        if kwargs.get('profiling', ''):
-                            return dict_with(o, output=outdata)
-                        else:
-                            return outdata
-                    return kall
-
-                for f in self._translator.function_data:
-                    vars(self)[f] = kall_factory(f)
-
-        return _abi_contract(me, code, sender, endowment, language)
+    def abi_contract(self, code, sender=k0, endowment=0, language='serpent', contract_name='',
+                     gas=None, log_listener=None, listen=True, **kwargs):
+        if contract_name:
+            assert language == 'solidity'
+            cn_args = dict(contract_name=contract_name)
+        else:
+            cn_args = kwargs
+        if language not in languages:
+            languages[language] = __import__(language)
+        language = languages[language]
+        evm = language.compile(code, **cn_args)
+        address = self.evm(evm, sender, endowment, gas)
+        assert len(self.block.get_code(address)), "Contract code empty"
+        _abi = language.mk_full_signature(code, **cn_args)
+        return ABIContract(self, _abi, address, listen=listen, log_listener=log_listener)
 
     def evm(self, evm, sender=k0, endowment=0, gas=None):
         sendnonce = self.block.get_nonce(u.privtoaddr(sender))
-        tx = t.contract(sendnonce, 1, gas_limit, endowment, evm)
+        tx = t.contract(sendnonce, gas_price, gas_limit, endowment, evm)
         tx.sign(sender)
         if gas is not None:
             tx.startgas = gas
-        print('starting', tx.startgas, gas_limit)
+        # print('starting', tx.startgas, gas_limit)
         (s, a) = pb.apply_transaction(self.block, tx)
         if not s:
-            raise Exception("Contract creation failed")
+            raise ContractCreationFailed()
         return a
 
     def call(*args, **kwargs):
@@ -171,13 +192,13 @@ class state():
                             " the abi_contract mechanism")
         tm, g = time.time(), self.block.gas_used
         sendnonce = self.block.get_nonce(u.privtoaddr(sender))
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         recorder = LogRecorder() if profiling > 1 else None
         (s, o) = pb.apply_transaction(self.block, tx)
         if not s:
-            raise Exception("Transaction failed")
+            raise TransactionFailed()
         out = {"output": o}
         if profiling > 0:
             zero_bytes = tx.data.count(ascii_chr(0))
@@ -209,7 +230,7 @@ class state():
             evmdata = serpent.encode_abi(funid, *abi)
         else:
             evmdata = serpent.encode_datalist(*data)
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         return spv.mk_transaction_spv_proof(self.block, tx)
@@ -221,7 +242,7 @@ class state():
             evmdata = serpent.encode_abi(funid, *abi)
         else:
             evmdata = serpent.encode_datalist(*data)
-        tx = t.Transaction(sendnonce, 1, gas_limit, to, value, evmdata)
+        tx = t.Transaction(sendnonce, gas_price, gas_limit, to, value, evmdata)
         self.last_tx = tx
         tx.sign(sender)
         return spv.verify_transaction_spv_proof(self.block, tx, proof)
@@ -236,6 +257,7 @@ class state():
         for i in range(n):
             self.block.finalize()
             self.block.commit_state()
+            self.db.put(self.block.hash, rlp.encode(self.block))
             t = self.block.timestamp + 6 + rand() % 12
             x = b.Block.init_from_parent(self.block, coinbase, timestamp=t)
             self.block = x
@@ -245,12 +267,16 @@ class state():
         return rlp.encode(self.block)
 
     def revert(self, data):
-        self.block = rlp.decode(data, b.Block, db=self.db)
+        self.block = rlp.decode(data, b.Block, env=self.env)
+        self.block._mutable = True
+        self.block.header._mutable = True
+        self.block._cached_rlp = None
+        self.block.header._cached_rlp = None
 
 # logging
 
 
-def set_logging_level(lvl=1):
+def set_logging_level(lvl=0):
     trace_lvl_map = [
         ':info',
         'eth.vm.log:trace',
@@ -283,4 +309,5 @@ def disable_logging():
     set_logging_level(0)
 
 
-gas_limit = 1000000
+gas_limit = 3141592
+gas_price = 1

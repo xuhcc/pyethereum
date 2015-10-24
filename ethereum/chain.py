@@ -1,12 +1,17 @@
 import os
 import time
 from ethereum import utils
+from ethereum import pruning_trie as trie
+from ethereum.refcount_db import RefcountDB
+from ethereum.db import OverlayDB
 from ethereum.utils import to_string, is_string
 import rlp
 from rlp.utils import encode_hex
 from ethereum import blocks
 from ethereum import processblock
 from ethereum.slogging import get_logger
+from ethereum.config import Env
+import sys
 log = get_logger('eth.chain')
 
 
@@ -24,8 +29,10 @@ class Index(object):
 
     """
 
-    def __init__(self, db, index_transactions=True):
-        self.db = db
+    def __init__(self, env, index_transactions=True):
+        assert isinstance(env, Env)
+        self.env = env
+        self.db = env.db
         self._index_transactions = index_transactions
 
     def add_block(self, blk):
@@ -40,7 +47,11 @@ class Index(object):
     def update_blocknumbers(self, blk):
         "start from head and update until the existing indices match the block"
         while True:
-            self.db.put(self._block_by_number_key(blk.number), blk.hash)
+            if blk.number > 0:
+                self.db.put_temporarily(self._block_by_number_key(blk.number), blk.hash)
+            else:
+                self.db.put(self._block_by_number_key(blk.number), blk.hash)
+            self.db.commit_refcount_changes(blk.number)
             if blk.number == 0:
                 break
             blk = blk.get_parent()
@@ -59,12 +70,13 @@ class Index(object):
     def _add_transactions(self, blk):
         "'tx_hash' -> 'rlp([blockhash,tx_number])"
         for i, tx in enumerate(blk.get_transactions()):
-            self.db.put(tx.hash, rlp.encode([blk.hash, i]))
+            self.db.put_temporarily(tx.hash, rlp.encode([blk.hash, i]))
+        self.db.commit_refcount_changes(blk.number)
 
     def get_transaction(self, txhash):
         "return (tx, block, index)"
         blockhash, tx_num_enc = rlp.decode(self.db.get(txhash))
-        blk = rlp.decode(self.db.get(blockhash), blocks.Block, db=self.db)
+        blk = rlp.decode(self.db.get(blockhash), blocks.Block, env=self.env)
         num = utils.decode_int(tx_num_enc)
         tx_data = blk.get_transaction(num)
         return tx_data, blk, num
@@ -78,7 +90,7 @@ class Index(object):
         # only efficient for few children per block
         children = list(set(self.get_children(parent_hash) + [child_hash]))
         assert children.count(child_hash) == 1
-        self.db.put(self._child_db_key(parent_hash), rlp.encode(children))
+        self.db.put_temporarily(self._child_db_key(parent_hash), rlp.encode(children))
 
     def get_children(self, blk_hash):
         "returns block hashes"
@@ -96,29 +108,34 @@ class Chain(object):
     :ivar head_candidate: the block which if mined by our miner would become
                           the new head
     """
+    head_candidate = None
 
-    def __init__(self, db, genesis=None, new_head_cb=None, coinbase='\x00' * 20):
-        self.db = self.blockchain = db
+    def __init__(self, env, genesis=None, new_head_cb=None, coinbase='\x00' * 20):
+        assert isinstance(env, Env)
+        self.env = env
+        self.db = self.blockchain = env.db
         self.new_head_cb = new_head_cb
-        self.index = Index(db)
-        self.head_candidate = None
+        self.index = Index(self.env)
         self._coinbase = coinbase
-        if genesis:
+        if 'HEAD' not in self.db:
             self._initialize_blockchain(genesis)
         log.debug('chain @', head_hash=self.head)
-        self.genesis = blocks.genesis(db=db)
-        log.debug('got genesis', genesis_hash=self.genesis)
+        self.genesis = self.get(self.index.get_block_by_number(0))
+        log.debug('got genesis', nonce=self.genesis.nonce.encode('hex'),
+                  difficulty=self.genesis.difficulty)
+        self._update_head_candidate()
 
     def _initialize_blockchain(self, genesis=None):
         log.info('Initializing new chain')
         if not genesis:
-            genesis = blocks.genesis(self.blockchain)
-            log.info('new genesis', genesis_hash=genesis)
+            genesis = blocks.genesis(self.env)
+            log.info('new genesis', genesis_hash=genesis, difficulty=genesis.difficulty)
             self.index.add_block(genesis)
         self._store_block(genesis)
-        assert genesis == blocks.get_block(self.blockchain, genesis.hash)
+        assert genesis == blocks.get_block(self.env, genesis.hash)
         self._update_head(genesis)
         assert genesis.hash in self
+        self.commit()
 
     @property
     def coinbase(self):
@@ -136,46 +153,113 @@ class Chain(object):
         if self.blockchain is None or 'HEAD' not in self.blockchain:
             self._initialize_blockchain()
         ptr = self.blockchain.get('HEAD')
-        return blocks.get_block(self.blockchain, ptr)
+        return blocks.get_block(self.env, ptr)
 
-    def _update_head(self, block):
+    def _update_head(self, block, forward_pending_transactions=True):
+        log.debug('updating head')
         if not block.is_genesis():
             #assert self.head.chain_difficulty() < block.chain_difficulty()
             if block.get_parent() != self.head:
                 log.debug('New Head is on a different branch',
                           head_hash=block, old_head_hash=self.head)
+        # Some temporary auditing to make sure pruning is working well
+        if block.number > 0 and block.number % 500 == 0 and isinstance(self.db, RefcountDB):
+            trie.proof.push(trie.RECORDING)
+            block.to_dict(with_state=True)
+            n = trie.proof.get_nodelist()
+            trie.proof.pop()
+            # log.debug('State size: %d\n' % sum([(len(rlp.encode(a)) + 32) for a in n]))
+        # Fork detected, revert death row and change logs
+        if block.number > 0:
+            b = block.get_parent()
+            h = self.head
+            b_children = []
+            if b.hash != h.hash:
+                log.warn('reverting')
+                while h.number > b.number:
+                    h.state.db.revert_refcount_changes(h.number)
+                    h = h.get_parent()
+                while b.number > h.number:
+                    b_children.append(b)
+                    b = b.get_parent()
+                while b.hash != h.hash:
+                    h.state.db.revert_refcount_changes(h.number)
+                    h = h.get_parent()
+                    b_children.append(b)
+                    b = b.get_parent()
+                for bc in b_children:
+                    processblock.verify(bc, bc.get_parent())
         self.blockchain.put('HEAD', block.hash)
+        assert self.blockchain.get('HEAD') == block.hash
         self.index.update_blocknumbers(self.head)
-
-        # update head candidate
-        transactions = self.get_transactions()
-        blk = self.head
-        uncles = set(u.header for u in self.get_brothers(self.head))
-        for i in range(8):
-            for u in blk.uncles:  # assuming uncle headers
-                u = utils.sha3(rlp.encode(u))
-                if u in self:
-                    uncles.discard(self.get(u))
-            if blk.has_parent():
-                blk = blk.get_parent()
-
-        uncles = list(uncles)
-        ts = max(int(time.time()), block.timestamp + 1)
-        self.head_candidate = blocks.Block.init_from_parent(block, coinbase=self._coinbase,
-                                                            timestamp=ts, uncles=uncles)
-        self.pre_finalize_state_root = self.head_candidate.state_root
-        self.head_candidate.finalize()
-        # add transactions from previous head candidate
-        for tx in transactions:
-            self.add_transaction(tx)
-
+        assert self.head == block
+        log.debug('set new head', head=self.head)
+        self._update_head_candidate(forward_pending_transactions)
         if self.new_head_cb and not block.is_genesis():
             self.new_head_cb(block)
+
+    def _update_head_candidate(self, forward_pending_transactions=True):
+        "after new head is set"
+        log.debug('updating head candidate', head=self.head)
+        # collect uncles
+        blk = self.head  # parent of the block we are collecting uncles for
+        uncles = set(u.header for u in self.get_brothers(blk))
+        for i in range(self.env.config['MAX_UNCLE_DEPTH'] + 2):
+            for u in blk.uncles:
+                assert isinstance(u, blocks.BlockHeader)
+                uncles.discard(u)
+            if blk.has_parent():
+                blk = blk.get_parent()
+        assert not uncles or max(u.number for u in uncles) <= self.head.number
+        uncles = list(uncles)[:self.env.config['MAX_UNCLES']]
+
+        # create block
+        ts = max(int(time.time()), self.head.timestamp + 1)
+        _env = Env(OverlayDB(self.head.db), self.env.config, self.env.global_config)
+        head_candidate = blocks.Block.init_from_parent(self.head, coinbase=self._coinbase,
+                                                       timestamp=ts, uncles=uncles, env=_env)
+        assert head_candidate.validate_uncles()
+
+        self.pre_finalize_state_root = head_candidate.state_root
+        head_candidate.finalize()
+
+        # add transactions from previous head candidate
+        old_head_candidate = self.head_candidate
+        self.head_candidate = head_candidate
+        if old_head_candidate is not None:
+            tx_hashes = self.head.get_transaction_hashes()
+            pending = [tx for tx in old_head_candidate.get_transactions()
+                       if tx.hash not in tx_hashes]
+            if pending:
+                if forward_pending_transactions:
+                    log.debug('forwarding pending transactions', num=len(pending))
+                    for tx in pending:
+                        self.add_transaction(tx)
+                else:
+                    log.debug('discarding pending transactions', num=len(pending))
+
+    def get_uncles(self, block):
+        """Return the uncles of `block`."""
+        if not block.has_parent():
+            return []
+        else:
+            return self.get_brothers(block.get_parent())
+
+    def get_brothers(self, block):
+        """Return the uncles of the hypothetical child of `block`."""
+        o = []
+        i = 0
+        while block.has_parent() and i < self.env.config['MAX_UNCLE_DEPTH']:
+            parent = block.get_parent()
+            o.extend([u for u in self.get_children(parent) if u != block])
+            block = block.get_parent()
+            i += 1
+        return o
 
     def get(self, blockhash):
         assert is_string(blockhash)
         assert len(blockhash) == 32
-        return blocks.get_block(self.blockchain, blockhash)
+        return blocks.get_block(self.env, blockhash)
 
     def has_block(self, blockhash):
         assert is_string(blockhash)
@@ -186,12 +270,15 @@ class Chain(object):
         return self.has_block(blockhash)
 
     def _store_block(self, block):
-        self.blockchain.put(block.hash, rlp.encode(block))
+        if block.number > 0:
+            self.blockchain.put_temporarily(block.hash, rlp.encode(block))
+        else:
+            self.blockchain.put(block.hash, rlp.encode(block))
 
     def commit(self):
         self.blockchain.commit()
 
-    def add_block(self, block, forward=False):
+    def add_block(self, block, forward_pending_transactions=True):
         "returns True if block was added sucessfully"
         _log = log.bind(block_hash=block)
         # make sure we know the parent
@@ -199,17 +286,11 @@ class Chain(object):
             _log.debug('missing parent')
             return False
 
-        if not block.validate_uncles(self.db):
+        if not block.validate_uncles():
             _log.debug('invalid uncles')
             return False
 
-        # check PoW and forward asap in order to avoid stale blocks
-        if not len(block.nonce) == 8:
-            _log.debug('nonce not set')
-            raise Exception("qwrqwr")
-            return False
-        elif not block.header.check_pow(nonce=block.nonce) and\
-                not block.is_genesis():
+        elif not block.header.check_pow() and not block.is_genesis():
             _log.debug('invalid nonce')
             return False
 
@@ -231,35 +312,21 @@ class Chain(object):
 
         # set to head if this makes the longest chain w/ most work for that number
         if block.chain_difficulty() > self.head.chain_difficulty():
-            _log.debug('new head')
-            self._update_head(block)
+            _log.debug('new head', num_tx=block.num_transactions())
+            self._update_head(block, forward_pending_transactions)
         elif block.number > self.head.number:
             _log.warn('has higher blk number than head but lower chain_difficulty',
                       head_hash=self.head, block_difficulty=block.chain_difficulty(),
                       head_difficulty=self.head.chain_difficulty())
+        block.transactions.clear_all()
+        block.receipts.clear_all()
+        block.state.db.commit_refcount_changes(block.number)
+        block.state.db.cleanup(block.number)
         self.commit()  # batch commits all changes that came with the new block
         return True
 
     def get_children(self, block):
         return [self.get(c) for c in self.index.get_children(block.hash)]
-
-    def get_brothers(self, block):
-        """Return the uncles of the hypothetical child of `block`."""
-        o = []
-        i = 0
-        while block.has_parent() and i < 6:
-            parent = block.get_parent()
-            o.extend([u for u in self.get_children(parent) if u != block])
-            block = parent
-            i += 1
-        return o
-
-    def get_uncles(self, block):
-        """Return the uncles of `block`."""
-        if not block.has_parent():
-            return []
-        else:
-            return self.get_brothers(block.get_parent())
 
     def add_transaction(self, transaction):
         """Add a transaction to the :attr:`head_candidate` block.
@@ -270,42 +337,52 @@ class Chain(object):
                   if the transaction was invalid
         """
         assert self.head_candidate is not None
-        log.debug('new tx', num_txs=len(self.get_transactions()), tx_hash=transaction)
-        if transaction in self.get_transactions():
+        head_candidate = self.head_candidate
+        log.debug('add tx', num_txs=self.num_transactions(), tx=transaction, on=head_candidate)
+        if self.head_candidate.includes_transaction(transaction.hash):
             log.debug('known tx')
             return
-        old_state_root = self.head_candidate.state_root
+        old_state_root = head_candidate.state_root
         # revert finalization
-        self.head_candidate.state_root = self.pre_finalize_state_root
+        head_candidate.state_root = self.pre_finalize_state_root
         try:
-            success, output = processblock.apply_transaction(self.head_candidate, transaction)
+            success, output = processblock.apply_transaction(head_candidate, transaction)
         except processblock.InvalidTransaction as e:
             # if unsuccessful the prerequisites were not fullfilled
             # and the tx is invalid, state must not have changed
             log.debug('invalid tx', error=e)
-            success = False
-
-        if success:
-            assert transaction in self.get_transactions()
-            self.pre_finalize_state_root = self.head_candidate.state_root
-            self.head_candidate.finalize()
-            log.debug('tx applied', result=output)
-            assert old_state_root != self.head_candidate.state_root
-            return True
-        else:
-            log.debug('tx failed')
-            self.head_candidate.state_root = old_state_root  # reset
+            head_candidate.state_root = old_state_root  # reset
             return False
+
+        log.debug('valid tx')
+
+        # we might have a new head_candidate (due to ctx switches in pyethapp)
+        if self.head_candidate != head_candidate:
+            log.debug('head_candidate changed during validation, trying again')
+            self.add_transaction(transaction)
+            return
+
+        self.pre_finalize_state_root = head_candidate.state_root
+        head_candidate.finalize()
+        log.debug('tx applied', result=output)
+        assert old_state_root != head_candidate.state_root
+        return True
 
     def get_transactions(self):
         """Get a list of new transactions not yet included in a mined block
         but known to the chain.
         """
-        log.debug("get_transactions called")
         if self.head_candidate:
+            log.debug('get_transactions called', on=self.head_candidate)
             return self.head_candidate.get_transactions()
         else:
             return []
+
+    def num_transactions(self):
+        if self.head_candidate:
+            return self.head_candidate.transaction_count
+        else:
+            return 0
 
     def get_chain(self, start='', count=10):
         "return 'count' blocks starting from head or start"
