@@ -100,35 +100,10 @@ def int_to_32bytearray(i):
         i >>= 8
     return o
 
-# measure sha3 calls
-
-sha3_call_counter = [0, 0, 0, 0]
-import time
-import atexit
-
-
-def _sha3_stats():
-    print 'sha3: calls:{} total_len:{} empty:{} tottime:{}'.format(*sha3_call_counter)
-
-atexit.register(_sha3_stats)
-
-
-def sha3_count(seed):
-    sha3_call_counter[0] += 1
-    sha3_call_counter[1] += len(seed)
-    if not seed:
-        sha3_call_counter[2] += 1
-    st = time.time()
-    d = sha3_256(seed).digest()
-    sha3_call_counter[3] += time.time() - st
-    return d
-
 
 def sha3(seed):
     return sha3_256(to_string(seed))
 assert sha3('').encode('hex') == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
-
-sha3 = sha3_count
 
 
 def privtoaddr(x, extended=False):

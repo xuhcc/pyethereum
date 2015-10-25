@@ -1,7 +1,6 @@
 import os
 import pbkdf2
 import sys
-
 try:
     scrypt = __import__('scrypt')
 except ImportError:
@@ -23,10 +22,15 @@ your wallet file.
 import binascii
 import struct
 from math import ceil
-from sha3 import sha3_256
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256
 from Crypto.Util import Counter
+
+try:
+    from keccak import sha3_256  # pypy
+except ImportError:
+    from sha3 import sha3_256 as _sha3_256
+    sha3_256 = lambda x: _sha3_256(x).digest()
 
 # TODO: make it compatible!
 
@@ -215,7 +219,8 @@ def decode_keystore_json(jsondata, pw):
 # Utility functions (done separately from utils so as to make this a standalone file)
 
 def sha3(seed):
-    return sha3_256(seed).digest()
+    return sha3_256(seed)
+assert sha3('').encode('hex') == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
 
 
 def zpad(x, l):
