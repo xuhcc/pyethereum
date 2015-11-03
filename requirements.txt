@@ -1,5 +1,4 @@
 bitcoin
-pykeccak
 pysha3
 PyYAML
 repoze.lru

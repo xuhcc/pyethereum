@@ -27,7 +27,8 @@ from Crypto.Hash import SHA256
 from Crypto.Util import Counter
 
 try:
-    from keccak import sha3_256  # pypy
+    from Crypto.Hash import keccak
+    sha3_256 = lambda x: keccak.new(digest_bits=256, data=x).digest()
 except ImportError:
     from sha3 import sha3_256 as _sha3_256
     sha3_256 = lambda x: _sha3_256(x).digest()
