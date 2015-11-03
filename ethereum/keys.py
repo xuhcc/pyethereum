@@ -25,13 +25,8 @@ from math import ceil
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256
 from Crypto.Util import Counter
-
-try:
-    from Crypto.Hash import keccak
-    sha3_256 = lambda x: keccak.new(digest_bits=256, data=x).digest()
-except ImportError:
-    from sha3 import sha3_256 as _sha3_256
-    sha3_256 = lambda x: _sha3_256(x).digest()
+from Crypto.Hash import keccak
+sha3_256 = lambda x: keccak.new(digest_bits=256, data=x).digest()
 
 # TODO: make it compatible!
 
