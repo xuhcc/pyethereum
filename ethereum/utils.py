@@ -134,8 +134,8 @@ def check_and_strip_checksum(x):
 
 
 def normalize_address(x, allow_blank=False):
-    if allow_blank and x == '':
-        return ''
+    if allow_blank and x in ['', b'']:
+        return b''
     if len(x) in (42, 50) and x[:2] == '0x':
         x = x[2:]
     if len(x) in (40, 48):
